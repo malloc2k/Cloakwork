@@ -546,6 +546,8 @@ int main() {
     std::cout << "    - " << CW_STR("anti-VM/sandbox detection") << std::endl;
     std::cout << "    - " << CW_STR("code integrity verification / hook detection") << std::endl;
 
+    std::cout << "    - " << CW_STR("kernel mode driver support (WDM/KMDF)") << std::endl;
+
     std::cout << std::endl;
     std::cout << "=== DEMO COMPLETE ===" << std::endl;
     std::cout << std::endl;
@@ -559,3 +561,120 @@ int main() {
     // obfuscated return value
     return CW_MBA(0);
 }
+
+// ==================================================================
+// KERNEL MODE EXAMPLE (not compiled - for reference only)
+// ==================================================================
+//
+// Cloakwork supports Windows kernel mode drivers. However, due to kernel
+// constraints (no STL, no CRT atexit, no C++20 concepts), most obfuscation
+// features are DISABLED by default in kernel mode.
+//
+// WHAT WORKS in kernel mode:
+// - Compile-time random generation (CW_RANDOM_CT, CW_RAND_CT)
+// - Runtime random generation (CW_RANDOM_RT, CW_RAND_RT)
+// - Compile-time string hashing (CW_HASH, CW_HASH_CI, CW_HASH_WIDE)
+// - Anti-debug (kernel debugger detection, hardware breakpoints)
+//
+// WHAT DOES NOT WORK (compiles to no-ops):
+// - CW_STR, CW_STR_LAYERED, CW_WSTR (string encryption disabled)
+// - CW_INT, CW_MBA (value obfuscation disabled)
+// - CW_IF, CW_ELSE, CW_BRANCH (control flow disabled)
+// - CW_TRUE, CW_FALSE, CW_BOOL (opaque predicates disabled)
+// - CW_ADD, CW_SUB, CW_EQ, etc. (MBA operations disabled)
+// - CW_CALL, CW_SPOOF_CALL (function obfuscation disabled)
+// - CW_SCATTER, CW_POLY (data hiding disabled)
+// - CW_ANTI_VM, CW_CHECK_VM (anti-VM disabled)
+// - CW_JUNK, CW_JUNK_FLOW (junk code disabled)
+// - CW_IMPORT (import hiding disabled)
+// - CW_DETECT_HOOK (integrity checks disabled)
+//
+// ```cpp
+// #include <ntddk.h>
+// #include "cloakwork.h"  // auto-detects kernel mode via _NTDDK_
+//
+// NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
+//     UNREFERENCED_PARAMETER(RegistryPath);
+//
+//     // ===== COMPILE-TIME STRING HASHING (WORKS) =====
+//     // these are consteval so they work in any mode
+//     constexpr uint32_t nt_close_hash = CW_HASH("NtClose");
+//     constexpr uint32_t ntoskrnl_hash = CW_HASH_CI("ntoskrnl.exe");
+//     DbgPrint("NtClose hash: 0x%X\n", nt_close_hash);
+//     DbgPrint("ntoskrnl hash: 0x%X\n", ntoskrnl_hash);
+//
+//     // runtime hash comparison
+//     const char* func_name = "NtClose";
+//     uint32_t runtime_hash = cloakwork::hash::fnv1a_runtime(func_name);
+//     if (runtime_hash == nt_close_hash) {
+//         DbgPrint("Hash match!\n");
+//     }
+//
+//     // ===== COMPILE-TIME RANDOM (WORKS) =====
+//     constexpr uint32_t build_key = CW_RANDOM_CT();
+//     constexpr int random_index = CW_RAND_CT(0, 255);
+//     DbgPrint("Build key: 0x%X, Random index: %d\n", build_key, random_index);
+//
+//     // ===== RUNTIME RANDOM (WORKS) =====
+//     // uses kernel entropy: rdtsc, KeQueryPerformanceCounter, KASLR, etc.
+//     uint64_t runtime_key = CW_RANDOM_RT();
+//     uint64_t random_value = CW_RAND_RT(1000, 9999);
+//     DbgPrint("Runtime key: 0x%llX, Random value: %llu\n", runtime_key, random_value);
+//
+//     // ===== ANTI-DEBUG (WORKS) =====
+//     // kernel debugger detection
+//     if (cloakwork::anti_debug::is_debugger_present()) {
+//         DbgPrint("Kernel debugger detected!\n");
+//         // KdDebuggerEnabled, KdDebuggerNotPresent, or PsIsProcessBeingDebugged
+//     }
+//
+//     // hardware breakpoint detection via debug registers (DR0-DR3)
+//     if (cloakwork::anti_debug::has_hardware_breakpoints()) {
+//         DbgPrint("Hardware breakpoints detected!\n");
+//     }
+//
+//     // timing check for single-stepping
+//     bool suspicious = cloakwork::anti_debug::timing_check([]() {
+//         volatile int x = 0;
+//         for (int i = 0; i < 100; i++) x += i;
+//     }, 50000);
+//     if (suspicious) {
+//         DbgPrint("Suspicious timing detected!\n");
+//     }
+//
+//     // comprehensive check (combines all)
+//     if (cloakwork::anti_debug::comprehensive_check()) {
+//         DbgPrint("Analysis detected - crashing!\n");
+//         KeBugCheckEx(0xDEAD, 0, 0, 0, 0);
+//     }
+//
+//     // ===== THINGS THAT DON'T WORK (NO-OPS) =====
+//     // these compile but provide NO protection in kernel mode:
+//     const char* msg = CW_STR("this is NOT encrypted");  // just returns "this is NOT encrypted"
+//     // CW_INT, CW_IF, CW_TRUE, etc. are all no-ops
+//
+//     DriverObject->DriverUnload = [](PDRIVER_OBJECT) {
+//         DbgPrint("Driver unloading\n");
+//     };
+//
+//     return STATUS_SUCCESS;
+// }
+// ```
+//
+// Kernel mode internal replacements:
+// - std::mutex      -> KSPIN_LOCK (kernel_spinlock class)
+// - std::atomic<T>  -> Interlocked* (kernel_atomic<T> class)
+// - new/HeapAlloc   -> ExAllocatePool2/ExFreePoolWithTag
+// - type traits     -> custom std::is_integral, std::enable_if, etc.
+// - std::array      -> custom implementation
+// - std::rotl/rotr  -> custom implementation
+//
+// Kernel entropy sources for CW_RANDOM_RT:
+// - __rdtsc()                  - CPU cycle counter
+// - PsGetCurrentProcess/Thread - KASLR randomized addresses
+// - KeQueryPerformanceCounter  - High-precision timer
+// - KeQuerySystemTime          - System time
+// - KeQueryInterruptTime       - Interrupt time
+// - Pool allocation addresses  - KASLR randomized
+// - Stack addresses            - KASLR randomized
+//

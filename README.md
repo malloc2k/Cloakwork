@@ -256,6 +256,146 @@ Performance-focused configuration:
 
 ***
 
+## Kernel Mode Support
+
+Cloakwork supports Windows kernel mode drivers (WDM/KMDF). Kernel mode is automatically detected when WDK headers are present (`_KERNEL_MODE`, `NTDDI_VERSION`, `_NTDDK_`, `_WDMDDK_`), or can be forced with `CW_KERNEL_MODE 1`.
+
+**Important:** Due to the constraints of kernel mode (no STL, no CRT atexit, no C++20 concepts), most obfuscation features are **disabled by default** in kernel mode. See the feature table below for details.
+
+### Kernel Mode Usage
+
+```cpp
+#include <ntddk.h>
+#define CW_KERNEL_MODE 1  // optional - auto-detected from ntddk.h
+#include "cloakwork.h"
+
+NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
+    UNREFERENCED_PARAMETER(RegistryPath);
+
+    // compile-time string hashing works (no encryption - see limitations)
+    constexpr uint32_t nt_hash = CW_HASH("NtClose");
+    DbgPrint("NtClose hash: 0x%X\n", nt_hash);
+
+    // compile-time random works
+    constexpr uint32_t random_key = CW_RANDOM_CT();
+    DbgPrint("Compile-time random: 0x%X\n", random_key);
+
+    // runtime random with kernel entropy sources
+    uint64_t runtime_key = CW_RANDOM_RT();
+    DbgPrint("Runtime random: 0x%llX\n", runtime_key);
+
+    // anti-debug detects kernel debuggers
+    if (cloakwork::anti_debug::is_debugger_present()) {
+        DbgPrint("Kernel debugger detected!\n");
+        // KdDebuggerEnabled, KdDebuggerNotPresent, or PsIsProcessBeingDebugged
+    }
+
+    // hardware breakpoint detection via debug registers
+    if (cloakwork::anti_debug::has_hardware_breakpoints()) {
+        DbgPrint("Hardware breakpoints detected (DR0-DR3)\n");
+    }
+
+    // NOTE: CW_STR, CW_INT, CW_IF, etc. are NO-OPS in kernel mode
+    // they compile to plain values without obfuscation
+    const char* msg = CW_STR("this is NOT encrypted in kernel mode");
+
+    DriverObject->DriverUnload = [](PDRIVER_OBJECT) {
+        DbgPrint("Driver unloading\n");
+    };
+
+    return STATUS_SUCCESS;
+}
+```
+
+### Kernel Mode Internals
+
+In kernel mode, Cloakwork provides STL-compatible replacements and kernel primitives:
+
+| Component | User Mode | Kernel Mode |
+|-----------|-----------|-------------|
+| Thread Safety | `std::mutex` | `KSPIN_LOCK` via `kernel_spinlock` |
+| Atomics | `std::atomic<T>` | `Interlocked*` via `kernel_atomic<T>` |
+| Memory Allocation | `new`/`HeapAlloc` | `ExAllocatePool2`/`ExFreePoolWithTag` |
+| Random Entropy | `QueryPerformanceCounter`, PIDs, heap addresses | `KeQueryPerformanceCounter`, `KeQueryInterruptTime`, KASLR, pool addresses |
+| Debugger Detection | PEB `BeingDebugged`, `IsDebuggerPresent` | `KdDebuggerEnabled`, `KdDebuggerNotPresent`, `PsIsProcessBeingDebugged` |
+| Debug Registers | `GetThreadContext` | Direct `__readdr()` intrinsic |
+| Exception Safety | SEH (`__try/__except`) | `MmIsAddressValid` checks |
+| Type Traits | `<type_traits>` | Custom `std::is_integral`, `std::enable_if`, etc. |
+| Index Sequence | `std::index_sequence` | Custom implementation |
+| Array | `std::array<T, N>` | Custom implementation |
+| Rotate | `std::rotl`/`std::rotr` | Custom implementation |
+
+### Kernel Mode Feature Availability
+
+**Enabled in kernel mode:**
+- `CW_ENABLE_COMPILE_TIME_RANDOM` - compile-time and runtime random generation
+- `CW_ENABLE_ANTI_DEBUG` - kernel debugger detection
+- String hashing (`CW_HASH`, `CW_HASH_CI`, `CW_HASH_WIDE`) - consteval, always works
+
+**Disabled in kernel mode (compile to no-ops):**
+
+| Feature | Reason Disabled | Effect |
+|---------|-----------------|--------|
+| `CW_ENABLE_STRING_ENCRYPTION` | Uses static destructors requiring `atexit` | `CW_STR(s)` → `(s)` |
+| `CW_ENABLE_VALUE_OBFUSCATION` | Uses C++20 concepts and `std::bit_cast` | `CW_INT(x)` → no obfuscation |
+| `CW_ENABLE_CONTROL_FLOW` | Depends on MBA from value obfuscation | `CW_IF` → regular `if` |
+| `CW_ENABLE_FUNCTION_OBFUSCATION` | Uses C++20 concepts | `CW_CALL(f)` → no obfuscation |
+| `CW_ENABLE_DATA_HIDING` | Uses `std::unique_ptr` | `CW_SCATTER` unavailable |
+| `CW_ENABLE_METAMORPHIC` | Uses `std::initializer_list` | Metamorphic functions unavailable |
+| `CW_ENABLE_IMPORT_HIDING` | PEB walking needs usermode structures | `CW_IMPORT` unavailable |
+| `CW_ENABLE_ANTI_VM` | Uses usermode APIs (`GetSystemInfo`, registry) | `CW_ANTI_VM()` → no-op |
+| `CW_ENABLE_INTEGRITY_CHECKS` | Requires `VirtualQuery` | Hook detection unavailable |
+| `CW_ENABLE_SYSCALLS` | Already in kernel, not applicable | `CW_SYSCALL_NUMBER` → 0 |
+
+### Kernel Anti-Debug Techniques
+
+The kernel mode anti-debug uses these detection methods:
+
+1. **KdDebuggerEnabled** - Global kernel flag set when kernel debugger is attached
+2. **KdDebuggerNotPresent** - Inverse flag (false = debugger present)
+3. **PsIsProcessBeingDebugged** - Per-process debug port check (dynamically resolved via `MmGetSystemRoutineAddress`)
+4. **Debug Registers** - Direct `__readdr()` intrinsic to read DR0-DR3 hardware breakpoints
+5. **Timing Analysis** - `KeQueryPerformanceCounter` vs RDTSC comparison for step detection
+
+```cpp
+// comprehensive kernel debugger check
+if (cloakwork::anti_debug::comprehensive_check()) {
+    // kernel debugger or hardware breakpoints detected
+    KeBugCheckEx(0xDEAD, 0, 0, 0, 0);
+}
+
+// individual checks
+if (cloakwork::anti_debug::is_debugger_present()) {
+    // KdDebuggerEnabled or PsIsProcessBeingDebugged
+}
+
+if (cloakwork::anti_debug::has_hardware_breakpoints()) {
+    // DR0-DR3 are non-zero
+}
+
+// timing check with callback
+bool suspicious = cloakwork::anti_debug::timing_check([]() {
+    volatile int x = 0;
+    for (int i = 0; i < 100; i++) x += i;
+}, 50000);
+```
+
+### Kernel Random Entropy Sources
+
+Runtime random in kernel mode combines multiple entropy sources:
+- `__rdtsc()` - CPU cycle counter
+- `PsGetCurrentProcess()` / `PsGetCurrentThread()` - KASLR randomized addresses
+- `PsGetCurrentProcessId()` / `PsGetCurrentThreadId()` - Process/thread IDs
+- `KeQueryPerformanceCounter()` - High-precision timer
+- `KeQuerySystemTime()` - System time
+- `KeQueryInterruptTime()` - Interrupt time (very high resolution)
+- Pool allocation address - KASLR randomized heap location
+- Stack address - KASLR randomized
+
+All sources are mixed using xorshift64* for fast, quality pseudorandom output.
+
+***
+
 ## API Reference
 
 ### String Encryption

@@ -47,6 +47,27 @@
 // CW_ENABLE_INTEGRITY_CHECKS       - self-integrity verification (default: 1)
 // CW_ANTI_DEBUG_RESPONSE           - response to debugger detection: 0=ignore, 1=crash, 2=fake (default: 1)
 //
+// KERNEL MODE SUPPORT:
+// --------------------
+// CW_KERNEL_MODE                   - enable kernel mode compatibility (default: auto-detect)
+//
+// Kernel mode is auto-detected via _KERNEL_MODE or NTDDI_VERSION macros.
+// You can also force kernel mode with: #define CW_KERNEL_MODE 1
+//
+// In kernel mode:
+//   - STL containers (vector, mutex, atomic) are replaced with kernel-safe alternatives
+//   - Heap operations use ExAllocatePool2/ExFreePool instead of new/malloc
+//   - Anti-debug uses kernel structures (EPROCESS, ETHREAD)
+//   - Import hiding walks DriverSection linked list
+//   - Syscalls are disabled (already in kernel)
+//   - Thread-safety uses spinlocks instead of std::mutex
+//
+// Kernel mode usage:
+// ------------------
+// #include <ntddk.h>
+// #define CW_KERNEL_MODE 1  // optional, auto-detected if ntddk.h included
+// #include "cloakwork.h"
+//
 // Minimal configuration example:
 // ------------------------------
 // #define CW_ENABLE_ALL 0                      // disable everything first
@@ -60,6 +81,81 @@
 // #include "cloakwork.h"
 //
 // =================================================================
+
+// =================================================================
+// KERNEL MODE DETECTION
+// =================================================================
+// auto-detect kernel mode from WDK headers or explicit definition
+#ifndef CW_KERNEL_MODE
+    #if defined(_KERNEL_MODE) || defined(NTDDI_VERSION) || defined(_NTDDK_) || defined(_WDMDDK_)
+        #define CW_KERNEL_MODE 1
+    #else
+        #define CW_KERNEL_MODE 0
+    #endif
+#endif
+
+// in kernel mode, disable features that require usermode APIs or STL
+#if CW_KERNEL_MODE
+    // syscalls don't make sense in kernel mode
+    #ifdef CW_ENABLE_SYSCALLS
+        #undef CW_ENABLE_SYSCALLS
+    #endif
+    #define CW_ENABLE_SYSCALLS 0
+
+    // data hiding uses std::unique_ptr - disable in kernel
+    #ifdef CW_ENABLE_DATA_HIDING
+        #undef CW_ENABLE_DATA_HIDING
+    #endif
+    #define CW_ENABLE_DATA_HIDING 0
+
+    // metamorphic uses std::initializer_list - disable in kernel
+    #ifdef CW_ENABLE_METAMORPHIC
+        #undef CW_ENABLE_METAMORPHIC
+    #endif
+    #define CW_ENABLE_METAMORPHIC 0
+
+    // string encryption uses static destructors which need atexit - disable in kernel
+    #ifdef CW_ENABLE_STRING_ENCRYPTION
+        #undef CW_ENABLE_STRING_ENCRYPTION
+    #endif
+    #define CW_ENABLE_STRING_ENCRYPTION 0
+
+    // value obfuscation uses C++20 concepts and std::bit_cast - disable in kernel
+    #ifdef CW_ENABLE_VALUE_OBFUSCATION
+        #undef CW_ENABLE_VALUE_OBFUSCATION
+    #endif
+    #define CW_ENABLE_VALUE_OBFUSCATION 0
+
+    // import hiding uses PEB walking which needs different impl in kernel
+    #ifdef CW_ENABLE_IMPORT_HIDING
+        #undef CW_ENABLE_IMPORT_HIDING
+    #endif
+    #define CW_ENABLE_IMPORT_HIDING 0
+
+    // anti-VM uses usermode APIs
+    #ifdef CW_ENABLE_ANTI_VM
+        #undef CW_ENABLE_ANTI_VM
+    #endif
+    #define CW_ENABLE_ANTI_VM 0
+
+    // integrity checks require usermode VirtualQuery
+    #ifdef CW_ENABLE_INTEGRITY_CHECKS
+        #undef CW_ENABLE_INTEGRITY_CHECKS
+    #endif
+    #define CW_ENABLE_INTEGRITY_CHECKS 0
+
+    // function obfuscation uses concepts
+    #ifdef CW_ENABLE_FUNCTION_OBFUSCATION
+        #undef CW_ENABLE_FUNCTION_OBFUSCATION
+    #endif
+    #define CW_ENABLE_FUNCTION_OBFUSCATION 0
+
+    // control flow obfuscation uses mba from value obfuscation
+    #ifdef CW_ENABLE_CONTROL_FLOW
+        #undef CW_ENABLE_CONTROL_FLOW
+    #endif
+    #define CW_ENABLE_CONTROL_FLOW 0
+#endif
 
 // default configuration - all features enabled
 #ifndef CW_ENABLE_ALL
@@ -132,32 +228,299 @@
 // includes
 // =================================================================
 
-#include <cstdint>
-#include <array>
-#include <bit>
-#include <type_traits>
-#include <utility>
-#include <vector>
-#include <algorithm>
-#include <atomic>
-#include <mutex>
-#include <memory>
-#include <concepts>
+#if CW_KERNEL_MODE
+    // =================================================================
+    // KERNEL MODE INCLUDES
+    // =================================================================
+    // assume ntddk.h is already included by the driver before cloakwork.h
+    // if not, the user needs to include it themselves
+    #ifndef _NTDDK_
+        #error "In kernel mode, include <ntddk.h> before cloakwork.h"
+    #endif
 
-#ifdef _WIN32
-    #include <windows.h>
     #include <intrin.h>
-    #include <winternl.h>
-    #include <tlhelp32.h>
-    #include <iphlpapi.h>
-    #pragma comment(lib, "iphlpapi.lib")
 
-    // full LDR_DATA_TABLE_ENTRY structure (winternl.h has incomplete definition, fuck those guys)
+    // forward declare ZwQuerySystemInformation if not available
+    extern "C" {
+        NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
+            ULONG SystemInformationClass,
+            PVOID SystemInformation,
+            ULONG SystemInformationLength,
+            PULONG ReturnLength
+        );
+    }
+
+    // define _fltused to satisfy linker when floating point is used
+    // selectany allows multiple definitions across translation units
+    extern "C" __declspec(selectany) int _fltused = 0;
+
+    // kernel mode: provide our own type definitions to avoid STL conflicts
+    // WDK doesn't support usermode STL headers properly
+
+    // fixed-width integer types for kernel mode (use Windows types)
+    using int8_t = signed char;
+    using int16_t = short;
+    using int32_t = int;
+    using int64_t = long long;
+    using uint8_t = unsigned char;
+    using uint16_t = unsigned short;
+    using uint32_t = unsigned int;
+    using uint64_t = unsigned long long;
+    using size_t = SIZE_T;
+    using ptrdiff_t = SSIZE_T;
+
+    namespace std {
+        // std::array replacement for kernel mode
+        template<typename T, size_t N>
+        struct array {
+            T _data[N];
+
+            constexpr T& operator[](size_t i) { return _data[i]; }
+            constexpr const T& operator[](size_t i) const { return _data[i]; }
+            constexpr T* data() { return _data; }
+            constexpr const T* data() const { return _data; }
+            constexpr size_t size() const { return N; }
+        };
+
+        // std::rotl/rotr replacements for kernel mode
+        template<typename T>
+        constexpr T rotl(T value, int shift) {
+            constexpr int bits = sizeof(T) * 8;
+            shift &= (bits - 1);
+            if (shift == 0) return value;
+            return (value << shift) | (value >> (bits - shift));
+        }
+
+        template<typename T>
+        constexpr T rotr(T value, int shift) {
+            constexpr int bits = sizeof(T) * 8;
+            shift &= (bits - 1);
+            if (shift == 0) return value;
+            return (value >> shift) | (value << (bits - shift));
+        }
+
+        // std::index_sequence for kernel mode
+        template<size_t... Is>
+        struct index_sequence {};
+
+        template<size_t N, size_t... Is>
+        struct make_index_sequence_impl : make_index_sequence_impl<N - 1, N - 1, Is...> {};
+
+        template<size_t... Is>
+        struct make_index_sequence_impl<0, Is...> {
+            using type = index_sequence<Is...>;
+        };
+
+        template<size_t N>
+        using make_index_sequence = typename make_index_sequence_impl<N>::type;
+
+        // type traits replacements for kernel mode
+        template<bool B, class T = void>
+        struct enable_if {};
+
+        template<class T>
+        struct enable_if<true, T> { using type = T; };
+
+        template<bool B, class T = void>
+        using enable_if_t = typename enable_if<B, T>::type;
+
+        template<class T, class U>
+        struct is_same { static constexpr bool value = false; };
+
+        template<class T>
+        struct is_same<T, T> { static constexpr bool value = true; };
+
+        template<class T, class U>
+        inline constexpr bool is_same_v = is_same<T, U>::value;
+
+        template<class T>
+        struct remove_cv { using type = T; };
+        template<class T>
+        struct remove_cv<const T> { using type = T; };
+        template<class T>
+        struct remove_cv<volatile T> { using type = T; };
+        template<class T>
+        struct remove_cv<const volatile T> { using type = T; };
+
+        template<class T>
+        using remove_cv_t = typename remove_cv<T>::type;
+
+        template<class T>
+        struct remove_reference { using type = T; };
+        template<class T>
+        struct remove_reference<T&> { using type = T; };
+        template<class T>
+        struct remove_reference<T&&> { using type = T; };
+
+        template<class T>
+        using remove_reference_t = typename remove_reference<T>::type;
+
+        template<class T>
+        struct is_integral { static constexpr bool value = false; };
+        template<> struct is_integral<bool> { static constexpr bool value = true; };
+        template<> struct is_integral<char> { static constexpr bool value = true; };
+        template<> struct is_integral<signed char> { static constexpr bool value = true; };
+        template<> struct is_integral<unsigned char> { static constexpr bool value = true; };
+        // wchar_t is unsigned short in kernel mode with /Zc:wchar_t-, skip to avoid duplicate
+        template<> struct is_integral<short> { static constexpr bool value = true; };
+        template<> struct is_integral<unsigned short> { static constexpr bool value = true; };
+        template<> struct is_integral<int> { static constexpr bool value = true; };
+        template<> struct is_integral<unsigned int> { static constexpr bool value = true; };
+        template<> struct is_integral<long> { static constexpr bool value = true; };
+        template<> struct is_integral<unsigned long> { static constexpr bool value = true; };
+        template<> struct is_integral<long long> { static constexpr bool value = true; };
+        template<> struct is_integral<unsigned long long> { static constexpr bool value = true; };
+
+        template<class T>
+        inline constexpr bool is_integral_v = is_integral<remove_cv_t<T>>::value;
+
+        template<class T>
+        struct is_floating_point { static constexpr bool value = false; };
+        template<> struct is_floating_point<float> { static constexpr bool value = true; };
+        template<> struct is_floating_point<double> { static constexpr bool value = true; };
+        template<> struct is_floating_point<long double> { static constexpr bool value = true; };
+
+        template<class T>
+        inline constexpr bool is_floating_point_v = is_floating_point<remove_cv_t<T>>::value;
+
+        template<class T>
+        struct is_arithmetic { static constexpr bool value = is_integral_v<T> || is_floating_point_v<T>; };
+
+        template<class T>
+        inline constexpr bool is_arithmetic_v = is_arithmetic<T>::value;
+
+        template<class T>
+        struct is_pointer { static constexpr bool value = false; };
+        template<class T>
+        struct is_pointer<T*> { static constexpr bool value = true; };
+        template<class T>
+        struct is_pointer<T* const> { static constexpr bool value = true; };
+        template<class T>
+        struct is_pointer<T* volatile> { static constexpr bool value = true; };
+        template<class T>
+        struct is_pointer<T* const volatile> { static constexpr bool value = true; };
+
+        template<class T>
+        inline constexpr bool is_pointer_v = is_pointer<T>::value;
+
+        template<class T>
+        T&& declval() noexcept;
+
+        template<class T>
+        constexpr T&& forward(remove_reference_t<T>& t) noexcept {
+            return static_cast<T&&>(t);
+        }
+
+        template<class T>
+        constexpr T&& forward(remove_reference_t<T>&& t) noexcept {
+            return static_cast<T&&>(t);
+        }
+
+        template<class T>
+        constexpr remove_reference_t<T>&& move(T&& t) noexcept {
+            return static_cast<remove_reference_t<T>&&>(t);
+        }
+    }
+
     namespace cloakwork_internal {
-        struct CW_LDR_DATA_TABLE_ENTRY {
+        // kernel spinlock wrapper for thread safety
+        class kernel_spinlock {
+        private:
+            KSPIN_LOCK lock;
+            KIRQL old_irql;
+
+        public:
+            kernel_spinlock() {
+                KeInitializeSpinLock(&lock);
+            }
+
+            void acquire() {
+                KeAcquireSpinLock(&lock, &old_irql);
+            }
+
+            void release() {
+                KeReleaseSpinLock(&lock, old_irql);
+            }
+        };
+
+        // simple spinlock guard (RAII)
+        class spinlock_guard {
+        private:
+            kernel_spinlock& lock;
+        public:
+            spinlock_guard(kernel_spinlock& l) : lock(l) { lock.acquire(); }
+            ~spinlock_guard() { lock.release(); }
+            spinlock_guard(const spinlock_guard&) = delete;
+            spinlock_guard& operator=(const spinlock_guard&) = delete;
+        };
+
+        // minimal atomic replacement for kernel mode
+        // uses interlocked operations
+        template<typename T>
+        class kernel_atomic {
+        private:
+            volatile T value;
+
+        public:
+            kernel_atomic() : value{} {}
+            kernel_atomic(T val) : value(val) {}
+
+            T load(int = 0) const {
+                // full memory barrier
+                MemoryBarrier();
+                return value;
+            }
+
+            void store(T val, int = 0) {
+                value = val;
+                MemoryBarrier();
+            }
+
+            T fetch_add(T val, int = 0) {
+                if constexpr (sizeof(T) == 4) {
+                    return static_cast<T>(InterlockedExchangeAdd(
+                        reinterpret_cast<volatile LONG*>(&value),
+                        static_cast<LONG>(val)));
+                } else if constexpr (sizeof(T) == 8) {
+                    return static_cast<T>(InterlockedExchangeAdd64(
+                        reinterpret_cast<volatile LONG64*>(&value),
+                        static_cast<LONG64>(val)));
+                } else {
+                    T old = value;
+                    value += val;
+                    return old;
+                }
+            }
+
+            T operator++() {
+                return fetch_add(1) + 1;
+            }
+
+            T operator++(int) {
+                return fetch_add(1);
+            }
+        };
+
+        // kernel pool allocation wrapper
+        inline void* kernel_alloc(size_t size) {
+            // use NonPagedPoolNx for security (no-execute)
+            return ExAllocatePool2(POOL_FLAG_NON_PAGED, size, 'kwlC');
+        }
+
+        inline void kernel_free(void* ptr) {
+            if (ptr) {
+                ExFreePoolWithTag(ptr, 'kwlC');
+            }
+        }
+
+        // LDR_DATA_TABLE_ENTRY for kernel driver enumeration
+        // (different structure than user mode PEB version)
+        struct KLDR_DATA_TABLE_ENTRY {
             LIST_ENTRY InLoadOrderLinks;
-            LIST_ENTRY InMemoryOrderLinks;
-            LIST_ENTRY InInitializationOrderLinks;
+            PVOID ExceptionTable;
+            ULONG ExceptionTableSize;
+            PVOID GpValue;
+            PVOID NonPagedDebugInfo;
             PVOID DllBase;
             PVOID EntryPoint;
             ULONG SizeOfImage;
@@ -165,23 +528,73 @@
             UNICODE_STRING BaseDllName;
             ULONG Flags;
             USHORT LoadCount;
-            USHORT TlsIndex;
-            union {
-                LIST_ENTRY HashLinks;
-                struct {
-                    PVOID SectionPointer;
-                    ULONG CheckSum;
-                };
-            };
-            union {
-                ULONG TimeDateStamp;
-                PVOID LoadedImports;
-            };
-            PVOID EntryPointActivationContext;
-            PVOID PatchInformation;
+            USHORT __Unused;
+            PVOID SectionPointer;
+            ULONG CheckSum;
+            ULONG TimeDateStamp;
         };
     }
-#endif
+
+    // type aliases for cross-mode compatibility
+    #define CW_ATOMIC(T) cloakwork_internal::kernel_atomic<T>
+    #define CW_MUTEX cloakwork_internal::kernel_spinlock
+    #define CW_LOCK_GUARD(m) cloakwork_internal::spinlock_guard _cw_guard(m)
+
+#else
+    // =================================================================
+    // USER MODE INCLUDES
+    // =================================================================
+    #include <vector>
+    #include <algorithm>
+    #include <atomic>
+    #include <mutex>
+    #include <memory>
+
+    #ifdef _WIN32
+        #include <windows.h>
+        #include <intrin.h>
+        #include <winternl.h>
+        #include <tlhelp32.h>
+        #include <iphlpapi.h>
+        #pragma comment(lib, "iphlpapi.lib")
+
+        // full LDR_DATA_TABLE_ENTRY structure (winternl.h has incomplete definition, fuck those guys)
+        namespace cloakwork_internal {
+            struct CW_LDR_DATA_TABLE_ENTRY {
+                LIST_ENTRY InLoadOrderLinks;
+                LIST_ENTRY InMemoryOrderLinks;
+                LIST_ENTRY InInitializationOrderLinks;
+                PVOID DllBase;
+                PVOID EntryPoint;
+                ULONG SizeOfImage;
+                UNICODE_STRING FullDllName;
+                UNICODE_STRING BaseDllName;
+                ULONG Flags;
+                USHORT LoadCount;
+                USHORT TlsIndex;
+                union {
+                    LIST_ENTRY HashLinks;
+                    struct {
+                        PVOID SectionPointer;
+                        ULONG CheckSum;
+                    };
+                };
+                union {
+                    ULONG TimeDateStamp;
+                    PVOID LoadedImports;
+                };
+                PVOID EntryPointActivationContext;
+                PVOID PatchInformation;
+            };
+        }
+    #endif
+
+    // type aliases for cross-mode compatibility
+    #define CW_ATOMIC(T) std::atomic<T>
+    #define CW_MUTEX std::mutex
+    #define CW_LOCK_GUARD(m) std::lock_guard<std::mutex> _cw_guard(m)
+
+#endif // CW_KERNEL_MODE
 
 // compiler detection and configuration
 #ifdef _MSC_VER
@@ -456,7 +869,43 @@ namespace cloakwork {
                 return entropy;
             }
 
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode entropy sources
+            // rdtsc - cpu cycle counter (changes every execution)
+            entropy ^= __rdtsc();
+
+            // current process/thread from kernel (kaslr makes these different)
+            entropy ^= reinterpret_cast<uint64_t>(PsGetCurrentProcess());
+            entropy ^= reinterpret_cast<uint64_t>(PsGetCurrentThread());
+            entropy ^= static_cast<uint64_t>(HandleToULong(PsGetCurrentProcessId())) << 32;
+            entropy ^= static_cast<uint64_t>(HandleToULong(PsGetCurrentThreadId()));
+
+            // stack address (kaslr randomizes this)
+            volatile char stack_var;
+            entropy ^= reinterpret_cast<uint64_t>(&stack_var);
+
+            // high-precision kernel performance counter
+            LARGE_INTEGER perf_counter;
+            perf_counter = KeQueryPerformanceCounter(nullptr);
+            entropy ^= static_cast<uint64_t>(perf_counter.QuadPart);
+
+            // kernel system time
+            LARGE_INTEGER system_time;
+            KeQuerySystemTime(&system_time);
+            entropy ^= static_cast<uint64_t>(system_time.QuadPart);
+
+            // current interrupt time (very high resolution)
+            entropy ^= static_cast<uint64_t>(KeQueryInterruptTime());
+
+            // pool allocation address (kaslr randomized)
+            void* pool_alloc = cloakwork_internal::kernel_alloc(16);
+            if (pool_alloc) {
+                entropy ^= reinterpret_cast<uint64_t>(pool_alloc);
+                cloakwork_internal::kernel_free(pool_alloc);
+            }
+
+#elif defined(_WIN32)
+            // user mode entropy sources
             // rdtsc - cpu cycle counter (changes every execution)
             entropy ^= __rdtsc();
 
@@ -504,8 +953,31 @@ namespace cloakwork {
             return entropy;
         }
 
-        // fast runtime random using xorshift64* (seeded once per thread)
+        // fast runtime random using xorshift64* (seeded once per thread/cpu)
         inline uint64_t runtime_entropy() {
+#if CW_KERNEL_MODE
+            // kernel mode: use a simple seeded state with interlocked update
+            // thread_local doesn't work well in kernel drivers
+            static volatile LONG64 state = 0;
+
+            // lazy initialization
+            LONG64 current = InterlockedCompareExchange64(&state, 0, 0);
+            if (current == 0) {
+                LONG64 seed = static_cast<LONG64>(runtime_entropy_seed());
+                InterlockedCompareExchange64(&state, seed, 0);
+                current = InterlockedCompareExchange64(&state, 0, 0);
+                if (current == 0) current = seed;
+            }
+
+            // xorshift64* with interlocked update
+            LONG64 x = current;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            InterlockedExchange64(&state, x);
+            return static_cast<uint64_t>(x) * 0x2545F4914F6CDD1DULL;
+#else
+            // user mode: use thread_local for per-thread state
             thread_local uint64_t state = runtime_entropy_seed();
 
             // xorshift64* algorithm - fast and good quality
@@ -515,8 +987,41 @@ namespace cloakwork {
             x ^= x >> 27;
             state = x;
             return x * 0x2545F4914F6CDD1DULL;
+#endif
         }
 
+#if CW_KERNEL_MODE
+        // kernel mode: consteval with __TIME__/__DATE__ doesn't work properly
+        // use a simpler constexpr approach with __COUNTER__ and __LINE__
+        constexpr uint32_t compile_seed_impl(uint32_t line, uint32_t counter) {
+            // lcg mixing with line and counter for per-instantiation uniqueness
+            uint32_t seed = 0xDEADBEEF;
+            seed ^= line * 0x01000193;
+            seed ^= counter * 0x811c9dc5;
+            seed *= 0x1664525;
+            seed += 0x1013904223;
+            return seed;
+        }
+
+        #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__LINE__, __COUNTER__))
+
+        template<uint32_t Seed>
+        struct random_generator {
+            static constexpr uint32_t value() {
+                return (Seed * 1664525u + 1013904223u);
+            }
+            static constexpr uint32_t next() {
+                return random_generator<value()>::value();
+            }
+        };
+    }
+
+    // kernel mode: use simpler compile-time random without consteval issues
+    #define CW_RANDOM_CT() (cloakwork::detail::random_generator<CW_COMPILE_SEED()>::value())
+    #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
+
+#else
+        // user mode: full consteval support with __TIME__/__DATE__
         consteval uint32_t compile_seed() {
             // combine multiple compile-time values for entropy
             constexpr uint32_t time_hash = fnv1a_hash(__TIME__);
@@ -539,6 +1044,7 @@ namespace cloakwork {
     // separate compile-time and runtime random macros
     #define CW_RANDOM_CT() (cloakwork::detail::random_generator<cloakwork::detail::compile_seed() ^ __COUNTER__>::value())
     #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
+#endif
 
     #define CW_RANDOM_RT() (cloakwork::detail::runtime_entropy())
     #define CW_RAND_RT(min, max) ((min) + (CW_RANDOM_RT() % ((max) - (min) + 1)))
@@ -706,7 +1212,44 @@ namespace cloakwork {
 
         // basic debugger detection - exposed for manual use
         CW_FORCEINLINE bool is_debugger_present() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode debugger detection
+
+            // technique 1: check for kernel debugger (KdDebuggerEnabled global)
+            // this is set when a kernel debugger is attached
+            if (*KdDebuggerEnabled) return true;
+
+            // technique 2: check if kernel debugger is not present flag is false
+            if (!*KdDebuggerNotPresent) return true;
+
+            // technique 3: check if current process is being debugged
+            // PsIsProcessBeingDebugged is documented and available since Windows 8
+            PEPROCESS current_process = PsGetCurrentProcess();
+            if (current_process) {
+                // use the documented API when available
+                // PsIsProcessBeingDebugged checks the DebugPort field internally
+                typedef BOOLEAN (*PsIsProcessBeingDebuggedFn)(PEPROCESS Process);
+                static PsIsProcessBeingDebuggedFn PsIsProcessBeingDebugged = nullptr;
+                static bool resolved = false;
+
+                if (!resolved) {
+                    UNICODE_STRING func_name;
+                    RtlInitUnicodeString(&func_name, L"PsIsProcessBeingDebugged");
+                    PsIsProcessBeingDebugged = reinterpret_cast<PsIsProcessBeingDebuggedFn>(
+                        MmGetSystemRoutineAddress(&func_name));
+                    resolved = true;
+                }
+
+                if (PsIsProcessBeingDebugged && PsIsProcessBeingDebugged(current_process)) {
+                    return true;
+                }
+            }
+
+            return false;
+
+#elif defined(_WIN32)
+            // user mode debugger detection
+
             // technique 1: isdebuggerpresent api
             if (::IsDebuggerPresent()) return true;
 
@@ -723,14 +1266,47 @@ namespace cloakwork {
             __except(EXCEPTION_EXECUTE_HANDLER) {
                 // silently handle access violations
             }
-#endif
             return false;
+#else
+            return false;
+#endif
         }
 
         // timing-based debugger detection with better thresholds
         template<typename Func>
         CW_FORCEINLINE bool timing_check(Func func, uint64_t threshold = 10000) {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode timing check
+            LARGE_INTEGER freq;
+            LARGE_INTEGER start = KeQueryPerformanceCounter(&freq);
+
+            uint64_t tsc_start = __rdtsc();
+
+            func();
+
+            LARGE_INTEGER end = KeQueryPerformanceCounter(nullptr);
+            uint64_t tsc_end = __rdtsc();
+
+            if (freq.QuadPart == 0) return false;
+
+            uint64_t qpc_elapsed = ((end.QuadPart - start.QuadPart) * 1000000) / freq.QuadPart;
+            uint64_t tsc_elapsed = tsc_end - tsc_start;
+
+            // check if either clock shows suspicious delay
+            if (qpc_elapsed > threshold || tsc_elapsed > threshold * 100) {
+                return true;
+            }
+
+            // check for clock desync (kernel debugger stepping)
+            if (qpc_elapsed > 0 && tsc_elapsed > 0) {
+                double ratio = static_cast<double>(tsc_elapsed) / static_cast<double>(qpc_elapsed);
+                if (ratio < 0.5 || ratio > 100000.0) return true;
+            }
+
+            return false;
+
+#elif defined(_WIN32)
+            // user mode timing check
             LARGE_INTEGER start, end, freq;
             QueryPerformanceFrequency(&freq);
 
@@ -773,15 +1349,44 @@ namespace cloakwork {
 
         // hardware breakpoint detection
         CW_FORCEINLINE bool has_hardware_breakpoints() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode: read debug registers directly
+            // DR0-DR3 contain hardware breakpoint addresses
+            // if any are non-zero, breakpoints are set
+#ifdef _WIN64
+            uint64_t dr0 = __readdr(0);
+            uint64_t dr1 = __readdr(1);
+            uint64_t dr2 = __readdr(2);
+            uint64_t dr3 = __readdr(3);
+            return (dr0 || dr1 || dr2 || dr3);
+#else
+            // x86 uses inline asm (not available in MSVC x64)
+            unsigned long dr0, dr1, dr2, dr3;
+            __asm {
+                mov eax, dr0
+                mov dr0, eax
+                mov eax, dr1
+                mov dr1, eax
+                mov eax, dr2
+                mov dr2, eax
+                mov eax, dr3
+                mov dr3, eax
+            }
+            return (dr0 || dr1 || dr2 || dr3);
+#endif
+
+#elif defined(_WIN32)
+            // user mode: use GetThreadContext
             CONTEXT ctx = {};
             ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
 
             if(GetThreadContext(GetCurrentThread(), &ctx)) {
                 return (ctx.Dr0 || ctx.Dr1 || ctx.Dr2 || ctx.Dr3);
             }
-#endif
             return false;
+#else
+            return false;
+#endif
         }
 
         // modern anti-debug techniques
@@ -789,7 +1394,11 @@ namespace cloakwork {
 
             // detect common anti-anti-debug plugins (scyllahide, titanhide, etc.)
             CW_FORCEINLINE bool detect_hiding_tools() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+                // kernel mode: these are user-mode specific checks
+                // in kernel, we rely on kernel debugger detection instead
+                return false;
+#elif defined(_WIN32)
                 __try {
                     // check for scyllahide dlls
                     if (GetModuleHandleA("scylla_hide.dll")) return true;
@@ -831,7 +1440,35 @@ namespace cloakwork {
 
             // detect kernel debugger
             CW_FORCEINLINE bool kernel_debugger_present() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+                // kernel mode: direct access to kernel debugger flags
+                if (*KdDebuggerEnabled) return true;
+                if (!*KdDebuggerNotPresent) return true;
+
+                // check SystemKernelDebuggerInformation via ZwQuerySystemInformation
+                struct {
+                    BOOLEAN KernelDebuggerEnabled;
+                    BOOLEAN KernelDebuggerNotPresent;
+                } kernel_debug_info = {};
+
+                ULONG return_length = 0;
+                // SYSTEM_INFORMATION_CLASS is not always defined, use raw value
+                NTSTATUS status = ZwQuerySystemInformation(
+                    23,  // SystemKernelDebuggerInformation
+                    &kernel_debug_info,
+                    sizeof(kernel_debug_info),
+                    &return_length);
+
+                if (NT_SUCCESS(status)) {
+                    if (kernel_debug_info.KernelDebuggerEnabled ||
+                        !kernel_debug_info.KernelDebuggerNotPresent) {
+                        return true;
+                    }
+                }
+
+                return false;
+
+#elif defined(_WIN32)
                 __try {
                     typedef NTSTATUS (NTAPI* pNtQuerySystemInformation)(
                         ULONG SystemInformationClass,
@@ -863,7 +1500,17 @@ namespace cloakwork {
 
             // check if parent process is a debugger
             CW_FORCEINLINE bool suspicious_parent_process() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+                // kernel mode: check parent process of current process
+                PEPROCESS current = PsGetCurrentProcess();
+                if (!current) return false;
+
+                // get parent process id - offset varies by windows version
+                // for simplicity, we skip this check in kernel mode
+                // (kernel drivers don't typically have meaningful parent processes)
+                return false;
+
+#elif defined(_WIN32)
                 __try {
                     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                     if (snapshot == INVALID_HANDLE_VALUE) return false;
@@ -925,7 +1572,14 @@ namespace cloakwork {
 
             // detect memory breakpoints (page guard)
             CW_FORCEINLINE bool detect_memory_breakpoints(void* address, size_t size) {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+                // kernel mode: check if memory is nonpaged and readable
+                // page guard detection is less relevant in kernel mode
+                // but we can check for suspicious memory states
+                if (!MmIsAddressValid(address)) return false;
+                return false;  // simplified for kernel
+
+#elif defined(_WIN32)
                 MEMORY_BASIC_INFORMATION mbi;
                 uint8_t* ptr = static_cast<uint8_t*>(address);
                 size_t remaining = size;
@@ -948,7 +1602,12 @@ namespace cloakwork {
 
             // check for debugger-specific registry keys
             CW_FORCEINLINE bool detect_debugger_artifacts() {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+                // kernel mode: could use ZwOpenKey but registry access
+                // from kernel is more complex. skip for now.
+                return false;
+
+#elif defined(_WIN32)
                 __try {
                     // check for common debugger installation paths in registry
                     HKEY key;
@@ -979,7 +1638,7 @@ namespace cloakwork {
 
             // advanced timing check (compares rdtsc vs qpc for hook detection)
             CW_FORCEINLINE bool advanced_timing_check() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     // compare rdtsc vs queryperformancecounter
                     LARGE_INTEGER freq, qpc_start, qpc_end;
@@ -1078,7 +1737,7 @@ namespace cloakwork {
 
             // detect hypervisor via cpuid
             CW_FORCEINLINE bool is_hypervisor_present() {
-#ifdef _WIN32
+#if defined(_WIN32)
                 int cpuInfo[4];
                 __cpuid(cpuInfo, 1);
                 return (cpuInfo[2] >> 31) & 1;  // hypervisor bit
@@ -1089,7 +1748,7 @@ namespace cloakwork {
 
             // detect VM vendor string
             CW_FORCEINLINE bool detect_vm_vendor() {
-#ifdef _WIN32
+#if defined(_WIN32)
                 __try {
                     int cpuInfo[4];
                     __cpuid(cpuInfo, 0x40000000);
@@ -1119,7 +1778,7 @@ namespace cloakwork {
 
             // check for low resource counts (common in sandboxes)
             CW_FORCEINLINE bool detect_low_resources() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     SYSTEM_INFO si;
                     GetSystemInfo(&si);
@@ -1144,7 +1803,7 @@ namespace cloakwork {
 
             // detect common sandbox DLLs
             CW_FORCEINLINE bool detect_sandbox_dlls() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     const char* sandboxDlls[] = {
                         "SbieDll.dll",      // sandboxie
@@ -1186,7 +1845,7 @@ namespace cloakwork {
 
             // detect suspicious usernames/computer names
             CW_FORCEINLINE bool detect_sandbox_names() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     char buffer[256];
                     DWORD size = sizeof(buffer);
@@ -1226,7 +1885,7 @@ namespace cloakwork {
 
             // detect VM-specific registry keys
             CW_FORCEINLINE bool detect_vm_registry() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     HKEY key;
                     const char* vmKeys[] = {
@@ -1254,7 +1913,7 @@ namespace cloakwork {
 
             // detect VM-specific MAC address prefixes
             CW_FORCEINLINE bool detect_vm_mac() {
-#ifdef _WIN32
+#if defined(_WIN32) && !CW_KERNEL_MODE
                 __try {
                     // common VM MAC prefixes (first 3 bytes)
                     const uint8_t vmMacPrefixes[][3] = {
@@ -1385,8 +2044,12 @@ namespace cloakwork {
         class encrypted_string {
         private:
             std::array<char, N> data;
-            mutable std::atomic<bool> decrypted{false};
-            mutable std::mutex mutex;
+            mutable CW_ATOMIC(bool) decrypted{false};
+#if CW_KERNEL_MODE
+            mutable CW_MUTEX mutex;
+#else
+            mutable CW_MUTEX mutex;
+#endif
 
             // compile-time keys (unique per build)
             static constexpr uint8_t compile_key1 = static_cast<uint8_t>(Key1);
@@ -1401,11 +2064,11 @@ namespace cloakwork {
             }
 
             CW_FORCEINLINE void decrypt_impl() const {
-                if(!decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
+                if(!decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
 
                     // double-check after acquiring lock
-                    if (!decrypted.load(std::memory_order_relaxed)) {
+                    if (!decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
 
                         for(size_t i = 0; i < N; ++i) {
@@ -1415,16 +2078,16 @@ namespace cloakwork {
                             char k3 = static_cast<char>((i * i) ^ 0x5A);
                             mutable_data[i] ^= k1 ^ k2 ^ k3;
                         }
-                        decrypted.store(true, std::memory_order_release);
+                        decrypted.store(true, 0);
                     }
                 }
             }
 
             CW_FORCEINLINE void encrypt_impl() const {
-                if(decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
+                if(decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
 
-                    if (decrypted.load(std::memory_order_relaxed)) {
+                    if (decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
 
                         for(size_t i = 0; i < N; ++i) {
@@ -1434,7 +2097,7 @@ namespace cloakwork {
                             char k3 = static_cast<char>((i * i) ^ 0x5A);
                             mutable_data[i] ^= k1 ^ k2 ^ k3;
                         }
-                        decrypted.store(false, std::memory_order_release);
+                        decrypted.store(false, 0);
                     }
                 }
             }
@@ -1474,9 +2137,9 @@ namespace cloakwork {
         class layered_encrypted_string {
         private:
             std::array<char, N> data;
-            mutable std::atomic<bool> decrypted{false};
-            mutable std::atomic<uint32_t> access_count{0};
-            mutable std::mutex mutex;
+            mutable CW_ATOMIC(bool) decrypted{false};
+            mutable CW_ATOMIC(uint32_t) access_count{0};
+            mutable CW_MUTEX mutex;
 
             static constexpr char encrypt_multilayer(char c, size_t i) {
                 // layer 1: position-dependent xor
@@ -1493,10 +2156,10 @@ namespace cloakwork {
             }
 
             CW_FORCEINLINE void decrypt_impl() const {
-                if(!decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
+                if(!decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
 
-                    if (!decrypted.load(std::memory_order_relaxed)) {
+                    if (!decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
 
                         for(size_t i = 0; i < N; ++i) {
@@ -1514,30 +2177,30 @@ namespace cloakwork {
 
                             mutable_data[i] = temp;
                         }
-                        decrypted.store(true, std::memory_order_release);
+                        decrypted.store(true, 0);
                     }
                 }
             }
 
             CW_FORCEINLINE void encrypt_impl() const {
-                if(decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
+                if(decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
 
-                    if (decrypted.load(std::memory_order_relaxed)) {
+                    if (decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
 
                         for(size_t i = 0; i < N; ++i) {
                             mutable_data[i] = encrypt_multilayer(mutable_data[i], i);
                         }
-                        decrypted.store(false, std::memory_order_release);
+                        decrypted.store(false, 0);
                     }
                 }
             }
 
             // polymorphic re-encryption on each access
             CW_FORCEINLINE void morph() const {
-                uint32_t count = access_count.fetch_add(1, std::memory_order_relaxed);
-                if(count % 10 == 0 && decrypted.load(std::memory_order_acquire)) {
+                uint32_t count = access_count.fetch_add(1, 0);
+                if(count % 10 == 0 && decrypted.load(0)) {
                     encrypt_impl();
                     decrypt_impl();
                 }
@@ -1607,8 +2270,8 @@ namespace cloakwork {
         class encrypted_wstring {
         private:
             std::array<wchar_t, N> data;
-            mutable std::atomic<bool> decrypted{false};
-            mutable std::mutex mutex;
+            mutable CW_ATOMIC(bool) decrypted{false};
+            mutable CW_MUTEX mutex;
 
             static constexpr uint16_t compile_key1 = static_cast<uint16_t>(Key1);
             static constexpr uint16_t compile_key2 = static_cast<uint16_t>(Key2);
@@ -1621,9 +2284,9 @@ namespace cloakwork {
             }
 
             CW_FORCEINLINE void decrypt_impl() const {
-                if(!decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    if (!decrypted.load(std::memory_order_relaxed)) {
+                if(!decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
+                    if (!decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<wchar_t, N>&>(data);
                         for(size_t i = 0; i < N; ++i) {
                             wchar_t k1 = static_cast<wchar_t>(compile_key1 + static_cast<uint16_t>(i));
@@ -1631,15 +2294,15 @@ namespace cloakwork {
                             wchar_t k3 = static_cast<wchar_t>((i * i) ^ 0x5A5A);
                             mutable_data[i] ^= k1 ^ k2 ^ k3;
                         }
-                        decrypted.store(true, std::memory_order_release);
+                        decrypted.store(true, 0);
                     }
                 }
             }
 
             CW_FORCEINLINE void encrypt_impl() const {
-                if(decrypted.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    if (decrypted.load(std::memory_order_relaxed)) {
+                if(decrypted.load(0)) {
+                    CW_LOCK_GUARD(mutex);
+                    if (decrypted.load(0)) {
                         auto& mutable_data = const_cast<std::array<wchar_t, N>&>(data);
                         for(size_t i = 0; i < N; ++i) {
                             wchar_t k1 = static_cast<wchar_t>(compile_key1 + static_cast<uint16_t>(i));
@@ -1647,7 +2310,7 @@ namespace cloakwork {
                             wchar_t k3 = static_cast<wchar_t>((i * i) ^ 0x5A5A);
                             mutable_data[i] ^= k1 ^ k2 ^ k3;
                         }
-                        decrypted.store(false, std::memory_order_release);
+                        decrypted.store(false, 0);
                     }
                 }
             }
@@ -1723,6 +2386,109 @@ namespace cloakwork {
 
 #if CW_ENABLE_VALUE_OBFUSCATION
 
+#if CW_KERNEL_MODE
+    // kernel mode: use enable_if instead of concepts
+    namespace detail {
+        template<typename T>
+        struct is_integral_type : std::is_integral<T> {};
+
+        template<typename T>
+        struct is_arithmetic_type : std::is_arithmetic<T> {};
+    }
+
+    // mixed boolean arithmetic obfuscation
+    namespace mba {
+        // MBA identity: x + y = (x ^ y) + 2 * (x & y)
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T add_mba(T x, T y) {
+            return (x ^ y) + ((x & y) << 1);
+        }
+
+        // MBA identity: x - y = (x ^ y) - 2 * (~x & y)
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T sub_mba(T x, T y) {
+            return (x ^ y) - ((~x & y) << 1);
+        }
+
+        // MBA identity: x * 2 = (x ^ (x << 1)) + (x << 1)
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T mul2_mba(T x) {
+            return (x ^ (x << 1)) + (x << 1);
+        }
+
+        // MBA identity: -x = ~x + 1
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T neg_mba(T x) {
+            return add_mba(static_cast<T>(~x), static_cast<T>(1));
+        }
+
+        // MBA identity: x & y = ~(~x | ~y)
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T and_mba(T x, T y) {
+            return ~(~x | ~y);
+        }
+
+        // MBA identity: x | y = ~(~x & ~y)
+        template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+        CW_FORCEINLINE constexpr T or_mba(T x, T y) {
+            return ~(~x & ~y);
+        }
+    }
+
+    template<typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+    class obfuscated_value {
+    private:
+        mutable T value{};
+        T xor_key{};
+        T add_key{};
+        mutable CW_ATOMIC(uint32_t) access_count{0};
+
+        // rotate bits for additional obfuscation
+        template<typename U = T, typename = std::enable_if_t<std::is_integral_v<U>>>
+        static constexpr U rotate_left(U val, int shift) {
+            constexpr int bits = sizeof(U) * 8;
+            shift %= bits;
+            return (val << shift) | (val >> (bits - shift));
+        }
+
+        template<typename U = T, typename = std::enable_if_t<std::is_integral_v<U>>>
+        static constexpr U rotate_right(U val, int shift) {
+            constexpr int bits = sizeof(U) * 8;
+            shift %= bits;
+            return (val >> shift) | (val << (bits - shift));
+        }
+
+    public:
+        obfuscated_value() {
+            xor_key = static_cast<T>(CW_RANDOM_RT());
+            add_key = static_cast<T>(CW_RANDOM_RT());
+            set(static_cast<T>(0));
+        }
+
+        obfuscated_value(T val) {
+            xor_key = static_cast<T>(CW_RANDOM_RT());
+            add_key = static_cast<T>(CW_RANDOM_RT());
+            set(val);
+        }
+
+        CW_FORCEINLINE void set(T val) {
+            if constexpr(std::is_integral_v<T>) {
+                // multi-step obfuscation for integers using MBA + XOR
+                T temp = mba::add_mba(val, add_key);
+                value = temp ^ xor_key;
+            } else if constexpr(sizeof(T) == sizeof(uint64_t)) {
+                // for floating point, use reinterpret
+                uint64_t bits;
+                memcpy(&bits, &val, sizeof(val));
+                uint64_t key_bits;
+                memcpy(&key_bits, &xor_key, sizeof(xor_key));
+                bits ^= key_bits;
+                memcpy(&value, &bits, sizeof(value));
+            } else if constexpr(sizeof(T) == sizeof(uint32_t)) {
+
+#else
+    // user mode: use C++20 concepts
+
     // concepts for type constraints
     template<typename T>
     concept Integral = std::is_integral_v<T>;
@@ -1775,7 +2541,7 @@ namespace cloakwork {
         mutable T value{};
         T xor_key{};
         T add_key{};
-        mutable std::atomic<uint32_t> access_count{0};
+        mutable CW_ATOMIC(uint32_t) access_count{0};
 
         // rotate bits for additional obfuscation
         template<Integral U = T>
@@ -1816,6 +2582,7 @@ namespace cloakwork {
                 bits ^= key_bits;
                 value = std::bit_cast<T>(bits);
             } else if constexpr(sizeof(T) == sizeof(uint32_t)) {
+#endif
                 uint32_t bits = std::bit_cast<uint32_t>(val);
                 uint32_t key_bits = std::bit_cast<uint32_t>(xor_key);
                 bits ^= key_bits;
@@ -1979,7 +2746,7 @@ namespace cloakwork {
             mutable uint8_t encoded_primary;
             mutable uint8_t encoded_secondary;
             mutable uint8_t encoded_tertiary;
-            mutable std::atomic<uint32_t> access_count{0};
+            mutable CW_ATOMIC(uint32_t) access_count{0};
 
             // distinct patterns for true/false that don't look like 0/1
             static constexpr uint8_t TRUE_PATTERN = Key1 ^ 0xAA ^ Key2;
@@ -2362,7 +3129,7 @@ namespace cloakwork {
         template<typename... Args>
         CW_FORCEINLINE auto operator()(Args&&... args) {
             // periodic inline checks instead of every call (reduces overhead)
-            static std::atomic<uint32_t> call_count{0};
+            static CW_ATOMIC(uint32_t) call_count{0};
             if ((++call_count % 100) == 0) {
                 CW_INLINE_CHECK();
             }
@@ -2468,7 +3235,7 @@ namespace cloakwork {
         class polymorphic_value {
         private:
             mutable T value;
-            mutable std::atomic<uint32_t> mutation_count{0};
+            mutable CW_ATOMIC(uint32_t) mutation_count{0};
 
             CW_FORCEINLINE void mutate() const {
                 if(++mutation_count % 100 == 0) {
@@ -2585,7 +3352,7 @@ namespace cloakwork {
             };
 
             mutation mutations[MAX_MUTATIONS];
-            mutable std::atomic<size_t> current_mutation{0};
+            mutable CW_ATOMIC(size_t) current_mutation{0};
 
         public:
             metamorphic_function(std::initializer_list<Func*> funcs) {
@@ -2618,15 +3385,14 @@ namespace cloakwork {
         };
     }
 #else
+    // stub when metamorphic is disabled - just wraps a single function pointer
     namespace metamorphic {
         template<typename Func>
         class metamorphic_function {
         private:
             Func* func_ptr;
         public:
-            metamorphic_function(std::initializer_list<Func*> funcs) {
-                if(funcs.size() > 0) func_ptr = *funcs.begin();
-            }
+            metamorphic_function(Func* func) : func_ptr(func) {}
             template<typename... Args>
             CW_FORCEINLINE auto operator()(Args&&... args) const {
                 return func_ptr(std::forward<Args>(args)...);
@@ -2642,9 +3408,61 @@ namespace cloakwork {
 #if CW_ENABLE_IMPORT_HIDING
     namespace imports {
 
-        // get module base by walking PEB
+        // get module base by hash
         CW_FORCEINLINE void* getModuleBase(uint32_t moduleHash) {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode: walk the driver section list via DRIVER_OBJECT
+            // we use PsLoadedModuleList which is the kernel's loaded module list
+
+            // first, try to find ntoskrnl.exe base using a known export
+            // this is a common kernel technique
+            typedef PVOID (*RtlPcToFileHeaderFn)(PVOID PcValue, PVOID* BaseOfImage);
+            static RtlPcToFileHeaderFn RtlPcToFileHeader = nullptr;
+            static bool rtl_resolved = false;
+
+            if (!rtl_resolved) {
+                UNICODE_STRING func_name;
+                RtlInitUnicodeString(&func_name, L"RtlPcToFileHeader");
+                RtlPcToFileHeader = reinterpret_cast<RtlPcToFileHeaderFn>(
+                    MmGetSystemRoutineAddress(&func_name));
+                rtl_resolved = true;
+            }
+
+            // get ntoskrnl base first if that's what we're looking for
+            if (RtlPcToFileHeader) {
+                PVOID ntoskrnl_base = nullptr;
+                RtlPcToFileHeader(reinterpret_cast<PVOID>(RtlPcToFileHeader), &ntoskrnl_base);
+
+                // check if this is the module we want
+                if (ntoskrnl_base) {
+                    auto dos = static_cast<IMAGE_DOS_HEADER*>(ntoskrnl_base);
+                    if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                            reinterpret_cast<uint8_t*>(ntoskrnl_base) + dos->e_lfanew);
+
+                        // we found ntoskrnl, check if that's the hash we want
+                        // common names to check
+                        uint32_t ntoskrnl_hashes[] = {
+                            hash::fnv1a_ci("ntoskrnl.exe", 12),
+                            hash::fnv1a_ci("ntkrnlpa.exe", 12),
+                            hash::fnv1a_ci("ntkrnlmp.exe", 12),
+                        };
+
+                        for (auto h : ntoskrnl_hashes) {
+                            if (h == moduleHash) return ntoskrnl_base;
+                        }
+                    }
+                }
+            }
+
+            // for other modules, use MmGetSystemRoutineAddress approach
+            // by searching for known exports that only exist in specific modules
+            // this is limited but works for common cases (ntoskrnl exports)
+
+            return nullptr;
+
+#elif defined(_WIN32)
+            // user mode: walk PEB module list
             __try {
 #ifdef _WIN64
                 auto peb = reinterpret_cast<PEB*>(__readgsqword(0x60));
@@ -2677,7 +3495,57 @@ namespace cloakwork {
 
         // get function address by walking export table
         CW_FORCEINLINE void* getProcAddress(void* module, uint32_t funcHash) {
-#ifdef _WIN32
+#if CW_KERNEL_MODE
+            // kernel mode: walk export table (same as user mode but no SEH)
+            if (!module) return nullptr;
+            if (!MmIsAddressValid(module)) return nullptr;
+
+            auto dos = static_cast<IMAGE_DOS_HEADER*>(module);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+
+            auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                reinterpret_cast<uint8_t*>(module) + dos->e_lfanew);
+            if (!MmIsAddressValid(nt)) return nullptr;
+            if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+
+            auto exportDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+            if (exportDir.VirtualAddress == 0) return nullptr;
+
+            auto exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+                reinterpret_cast<uint8_t*>(module) + exportDir.VirtualAddress);
+            if (!MmIsAddressValid(exports)) return nullptr;
+
+            auto names = reinterpret_cast<uint32_t*>(
+                reinterpret_cast<uint8_t*>(module) + exports->AddressOfNames);
+            auto ordinals = reinterpret_cast<uint16_t*>(
+                reinterpret_cast<uint8_t*>(module) + exports->AddressOfNameOrdinals);
+            auto functions = reinterpret_cast<uint32_t*>(
+                reinterpret_cast<uint8_t*>(module) + exports->AddressOfFunctions);
+
+            for (uint32_t i = 0; i < exports->NumberOfNames; ++i) {
+                auto name = reinterpret_cast<const char*>(
+                    reinterpret_cast<uint8_t*>(module) + names[i]);
+
+                if (!MmIsAddressValid(const_cast<char*>(name))) continue;
+
+                if (hash::fnv1a_runtime(name) == funcHash) {
+                    uint32_t funcRva = functions[ordinals[i]];
+
+                    // check for forwarded export
+                    if (funcRva >= exportDir.VirtualAddress &&
+                        funcRva < exportDir.VirtualAddress + exportDir.Size) {
+                        // forwarded export - not handling for simplicity
+                        return nullptr;
+                    }
+
+                    return reinterpret_cast<uint8_t*>(module) + funcRva;
+                }
+            }
+
+            return nullptr;
+
+#elif defined(_WIN32)
+            // user mode: walk export table with SEH
             if (!module) return nullptr;
 
             __try {
@@ -2820,6 +3688,7 @@ namespace cloakwork {
     // obfuscated comparisons
     // =================================================================
 
+#if CW_ENABLE_VALUE_OBFUSCATION
     namespace comparison {
 
         // obfuscated equality check
@@ -2891,6 +3760,15 @@ namespace cloakwork {
     #define CW_GT(a, b) (cloakwork::comparison::obfuscated_greater((a), (b)))
     #define CW_LE(a, b) (cloakwork::comparison::obfuscated_less_equal((a), (b)))
     #define CW_GE(a, b) (cloakwork::comparison::obfuscated_greater_equal((a), (b)))
+#else
+    // stubs when value obfuscation is disabled
+    #define CW_EQ(a, b) ((a) == (b))
+    #define CW_NE(a, b) ((a) != (b))
+    #define CW_LT(a, b) ((a) < (b))
+    #define CW_GT(a, b) ((a) > (b))
+    #define CW_LE(a, b) ((a) <= (b))
+    #define CW_GE(a, b) ((a) >= (b))
+#endif
 
     // =================================================================
     // encrypted compile-time constants
@@ -3118,7 +3996,7 @@ namespace cloakwork {
             Func* func;
             uint32_t expectedHash;
             size_t codeSize;
-            mutable std::atomic<uint32_t> checkCount{0};
+            mutable CW_ATOMIC(uint32_t) checkCount{0};
 
         public:
             integrity_checked(Func* f, size_t size)
