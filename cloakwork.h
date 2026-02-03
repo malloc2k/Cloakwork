@@ -11,7 +11,7 @@
 //╚██████╗███████╗╚██████╔╝██║  ██║██║  ██╗╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗
 // ╚═════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
 
-// Created by @ck0i on Discord.
+// Created by @helz.dev on Discord.
 // Inspiration from obfusheader.h and Zapcrash's nimrodhide.h
 
 // =================================================================
@@ -83,7 +83,7 @@
 // =================================================================
 
 #ifndef CW_KERNEL_MODE
-    #if defined(_KERNEL_MODE) || defined(NTDDI_VERSION) || defined(_NTDDK_) || defined(_WDMDDK_)
+    #if defined(_KERNEL_MODE)
         #define CW_KERNEL_MODE 1
     #else
         #define CW_KERNEL_MODE 0
