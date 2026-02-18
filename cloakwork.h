@@ -2232,15 +2232,15 @@ namespace cloakwork {
 
             CW_FORCEINLINE bool comprehensive_check() {
                 __try {
-                    if (is_hypervisor_present()) return true;
-                    if (detect_vm_vendor()) return true;
-                    if (detect_low_resources()) return true;
-                    if (detect_sandbox_dlls()) return true;
-                    if (detect_sandbox_names()) return true;
-                    if (detect_vm_registry()) return true;
-                    if (detect_vm_mac()) return true;
-                    return false;
+                    return is_hypervisor_present() ||
+                        detect_vm_vendor() ||
+                        detect_low_resources() ||
+                        detect_sandbox_dlls() ||
+                        detect_sandbox_names() ||
+                        detect_vm_registry() ||
+                        detect_vm_mac();
                 }
+
                 __except (EXCEPTION_EXECUTE_HANDLER) {
                     return false;
                 }
@@ -4315,10 +4315,10 @@ namespace cloakwork {
 
     public:
         obfuscated_call(Func* func) {
-            ptr_key.k[0] = static_cast<uint32_t>(CW_RANDOM_RT());
-            ptr_key.k[1] = static_cast<uint32_t>(CW_RANDOM_RT());
-            ptr_key.k[2] = static_cast<uint32_t>(CW_RANDOM_RT());
-            ptr_key.k[3] = static_cast<uint32_t>(CW_RANDOM_RT());
+            for (int i = 0; i < 4; ++i) {
+                ptr_key.k[i] = static_cast<uint32_t>(CW_RANDOM_RT());
+            }
+
 
             encrypt_ptr(func);
 
