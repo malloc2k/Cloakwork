@@ -507,6 +507,8 @@
     #define CW_MUTEX cloakwork_internal::kernel_spinlock
     #define CW_LOCK_GUARD(m) cloakwork_internal::spinlock_guard _cw_guard(m)
     #define CW_MO_RELAXED 0
+    #define CW_MO_ACQUIRE 0
+    #define CW_MO_RELEASE 0
 
 #else
     #include <array>
@@ -560,6 +562,8 @@
     #define CW_MUTEX std::mutex
     #define CW_LOCK_GUARD(m) std::lock_guard<std::mutex> _cw_guard(m)
     #define CW_MO_RELAXED std::memory_order_relaxed
+    #define CW_MO_ACQUIRE std::memory_order_acquire
+    #define CW_MO_RELEASE std::memory_order_release
 
 #endif // CW_KERNEL_MODE
 
@@ -2011,7 +2015,6 @@ namespace cloakwork {
                 __try {
                     constexpr uint32_t sandbox_dll_hashes[] = {
                         CW_HASH_CI("SbieDll.dll"),       // sandboxie
-                        CW_HASH_CI("dbghelp.dll"),       // often loaded by analysis tools
                         CW_HASH_CI("api_log.dll"),       // api logging
                         CW_HASH_CI("dir_watch.dll"),     // directory watching
                         CW_HASH_CI("pstorec.dll"),       // password store
@@ -2086,24 +2089,21 @@ namespace cloakwork {
 
                         CW_ADSTR(s0, "sandbox"); CW_ADSTR(s1, "virus");
                         CW_ADSTR(s2, "malware"); CW_ADSTR(s3, "sample");
-                        CW_ADSTR(s4, "test");    CW_ADSTR(s5, "user");
-                        CW_ADSTR(s6, "admin");   CW_ADSTR(s7, "currentuser");
-                        CW_ADSTR(s8, "vmware");  CW_ADSTR(s9, "vbox");
+                        CW_ADSTR(s4, "currentuser");
+                        CW_ADSTR(s5, "vmware");  CW_ADSTR(s6, "vbox");
 
-                        const char* checks[] = { s0, s1, s2, s3, s4, s5, s6, s7, s8, s9 };
+                        const char* checks[] = { s0, s1, s2, s3, s4, s5, s6 };
                         for (auto c : checks) {
                             if (internal_cipher::find_substr(buffer, c)) {
                                 CW_ADSTR_ZERO(s0); CW_ADSTR_ZERO(s1); CW_ADSTR_ZERO(s2);
                                 CW_ADSTR_ZERO(s3); CW_ADSTR_ZERO(s4); CW_ADSTR_ZERO(s5);
-                                CW_ADSTR_ZERO(s6); CW_ADSTR_ZERO(s7); CW_ADSTR_ZERO(s8);
-                                CW_ADSTR_ZERO(s9);
+                                CW_ADSTR_ZERO(s6);
                                 return true;
                             }
                         }
                         CW_ADSTR_ZERO(s0); CW_ADSTR_ZERO(s1); CW_ADSTR_ZERO(s2);
                         CW_ADSTR_ZERO(s3); CW_ADSTR_ZERO(s4); CW_ADSTR_ZERO(s5);
-                        CW_ADSTR_ZERO(s6); CW_ADSTR_ZERO(s7); CW_ADSTR_ZERO(s8);
-                        CW_ADSTR_ZERO(s9);
+                        CW_ADSTR_ZERO(s6);
                     }
 
                     size = sizeof(buffer);
@@ -2111,20 +2111,19 @@ namespace cloakwork {
                         for (DWORD i = 0; i < size && buffer[i]; ++i)
                             if (buffer[i] >= 'A' && buffer[i] <= 'Z') buffer[i] += 32;
 
-                        CW_ADSTR(c0, "sandbox"); CW_ADSTR(c1, "test");
-                        CW_ADSTR(c2, "virus");   CW_ADSTR(c3, "malware");
-                        CW_ADSTR(c4, "sample");
+                        CW_ADSTR(c0, "sandbox"); CW_ADSTR(c1, "virus");
+                        CW_ADSTR(c2, "malware"); CW_ADSTR(c3, "sample");
 
-                        const char* checks[] = { c0, c1, c2, c3, c4 };
+                        const char* checks[] = { c0, c1, c2, c3 };
                         for (auto c : checks) {
                             if (internal_cipher::find_substr(buffer, c)) {
                                 CW_ADSTR_ZERO(c0); CW_ADSTR_ZERO(c1); CW_ADSTR_ZERO(c2);
-                                CW_ADSTR_ZERO(c3); CW_ADSTR_ZERO(c4);
+                                CW_ADSTR_ZERO(c3);
                                 return true;
                             }
                         }
                         CW_ADSTR_ZERO(c0); CW_ADSTR_ZERO(c1); CW_ADSTR_ZERO(c2);
-                        CW_ADSTR_ZERO(c3); CW_ADSTR_ZERO(c4);
+                        CW_ADSTR_ZERO(c3);
                     }
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2428,12 +2427,12 @@ namespace cloakwork {
             // noinline + optimization off: prevents LTCG from constant-folding the decrypt
             CW_NOINLINE const char* get() const {
                 CW_COMPILER_BARRIER();
-                if (!decrypted.load(CW_MO_RELAXED)) {
+                if (!decrypted.load(CW_MO_ACQUIRE)) {
                     CW_LOCK_GUARD(mutex);
                     if (!decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
                         xtea::decrypt_buffer(mutable_data.data(), N, compile_key);
-                        decrypted.store(true, CW_MO_RELAXED);
+                        decrypted.store(true, CW_MO_RELEASE);
                     }
                 }
                 CW_COMPILER_BARRIER();
@@ -2448,7 +2447,7 @@ namespace cloakwork {
                     if (decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
                         xtea::encrypt_buffer(mutable_data.data(), N, compile_key);
-                        decrypted.store(false, CW_MO_RELAXED);
+                        decrypted.store(false, CW_MO_RELEASE);
                     }
                 }
             }
@@ -2496,23 +2495,23 @@ namespace cloakwork {
 
             CW_NOINLINE const char* get() const {
                 CW_COMPILER_BARRIER();
-                if (!decrypted.load(CW_MO_RELAXED)) {
+                if (!decrypted.load(CW_MO_ACQUIRE)) {
                     CW_LOCK_GUARD(mutex);
                     if (!decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
                         xtea::decrypt_buffer(mutable_data.data(), N, current_key);
-                        decrypted.store(true, CW_MO_RELAXED);
+                        decrypted.store(true, CW_MO_RELEASE);
                     }
                 }
 
                 // polymorphic re-encryption every 10 accesses
                 uint32_t count = access_count.fetch_add(1, CW_MO_RELAXED);
-                if (count > 0 && (count % 10) == 0 && decrypted.load(CW_MO_RELAXED)) {
+                if (count > 0 && (count % 10) == 0 && decrypted.load(CW_MO_ACQUIRE)) {
                     CW_LOCK_GUARD(mutex);
                     if (decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
-                        rekey();
                         xtea::encrypt_buffer(mutable_data.data(), N, current_key);
+                        rekey();
                         xtea::decrypt_buffer(mutable_data.data(), N, current_key);
                     }
                 }
@@ -2529,7 +2528,7 @@ namespace cloakwork {
                     if (decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<char, N>&>(data);
                         xtea::encrypt_buffer(mutable_data.data(), N, current_key);
-                        decrypted.store(false, CW_MO_RELAXED);
+                        decrypted.store(false, CW_MO_RELEASE);
                     }
                 }
             }
@@ -2601,7 +2600,7 @@ namespace cloakwork {
 
             CW_NOINLINE const wchar_t* get() const {
                 CW_COMPILER_BARRIER();
-                if (!decrypted.load(CW_MO_RELAXED)) {
+                if (!decrypted.load(CW_MO_ACQUIRE)) {
                     CW_LOCK_GUARD(mutex);
                     if (!decrypted.load(CW_MO_RELAXED)) {
                         auto& mutable_data = const_cast<std::array<wchar_t, N>&>(data);
@@ -2615,7 +2614,7 @@ namespace cloakwork {
                             mutable_data[i] = static_cast<wchar_t>(bytes[i * 2])
                                             | (static_cast<wchar_t>(bytes[i * 2 + 1]) << 8);
                         }
-                        decrypted.store(true, CW_MO_RELAXED);
+                        decrypted.store(true, CW_MO_RELEASE);
                     }
                 }
                 CW_COMPILER_BARRIER();
@@ -2639,7 +2638,7 @@ namespace cloakwork {
                             mutable_data[i] = static_cast<wchar_t>(bytes[i * 2])
                                             | (static_cast<wchar_t>(bytes[i * 2 + 1]) << 8);
                         }
-                        decrypted.store(false, CW_MO_RELAXED);
+                        decrypted.store(false, CW_MO_RELEASE);
                     }
                 }
             }
@@ -2760,6 +2759,7 @@ namespace cloakwork {
         static constexpr U rotate_left(U val, int shift) {
             constexpr int bits = sizeof(U) * 8;
             shift %= bits;
+            if (shift == 0) return val;
             return (val << shift) | (val >> (bits - shift));
         }
 
@@ -2767,6 +2767,7 @@ namespace cloakwork {
         static constexpr U rotate_right(U val, int shift) {
             constexpr int bits = sizeof(U) * 8;
             shift %= bits;
+            if (shift == 0) return val;
             return (val >> shift) | (val << (bits - shift));
         }
 
@@ -2930,6 +2931,7 @@ namespace cloakwork {
         static constexpr U rotate_left(U val, int shift) {
             constexpr int bits = sizeof(U) * 8;
             shift %= bits;
+            if (shift == 0) return val;
             return (val << shift) | (val >> (bits - shift));
         }
 
@@ -2937,6 +2939,7 @@ namespace cloakwork {
         static constexpr U rotate_right(U val, int shift) {
             constexpr int bits = sizeof(U) * 8;
             shift %= bits;
+            if (shift == 0) return val;
             return (val >> shift) | (val << (bits - shift));
         }
 
@@ -4315,9 +4318,10 @@ namespace cloakwork {
 
     public:
         obfuscated_call(Func* func) {
-            for (int i = 0; i < 4; ++i) {
-                ptr_key.k[i] = static_cast<uint32_t>(CW_RANDOM_RT());
-            }
+            ptr_key.k[0] = static_cast<uint32_t>(CW_RANDOM_RT());
+            ptr_key.k[1] = static_cast<uint32_t>(CW_RANDOM_RT());
+            ptr_key.k[2] = static_cast<uint32_t>(CW_RANDOM_RT());
+            ptr_key.k[3] = static_cast<uint32_t>(CW_RANDOM_RT());
 
 
             encrypt_ptr(func);
@@ -4618,6 +4622,7 @@ namespace cloakwork {
 #if defined(_WIN64) && !CW_KERNEL_MODE
             static constexpr uint32_t REGEN_INTERVAL = 1000;
             mutable uint8_t* thunk = nullptr;
+            mutable uint8_t* retired_thunk = nullptr;  // deferred free, prevents use-after-free
             mutable CW_MUTEX mutex;
 #endif
 
@@ -4639,6 +4644,7 @@ namespace cloakwork {
             ~metamorphic_function() {
 #if defined(_WIN64) && !CW_KERNEL_MODE
                 thunk_gen::free_thunk(thunk);
+                thunk_gen::free_thunk(retired_thunk);
 #endif
             }
 
@@ -4649,7 +4655,9 @@ namespace cloakwork {
                 : real_func(other.real_func), call_count(other.call_count.load()) {
 #if defined(_WIN64) && !CW_KERNEL_MODE
                 thunk = other.thunk;
+                retired_thunk = other.retired_thunk;
                 other.thunk = nullptr;
+                other.retired_thunk = nullptr;
 #endif
             }
 
@@ -4659,13 +4667,15 @@ namespace cloakwork {
 
 #if defined(_WIN64) && !CW_KERNEL_MODE
                 // regenerate thunk every N calls - different machine code each time
+                // retired_thunk defers the free by one generation so any thread
+                // still executing on the old page finishes before it's released
                 if (thunk && (count % REGEN_INTERVAL) == 0) {
                     CW_LOCK_GUARD(mutex);
-                    uint8_t* old_thunk = thunk;
                     uint8_t* new_thunk = thunk_gen::generate_thunk(reinterpret_cast<void*>(real_func));
                     if (new_thunk) {
+                        thunk_gen::free_thunk(retired_thunk);
+                        retired_thunk = thunk;
                         const_cast<uint8_t*&>(thunk) = new_thunk;
-                        thunk_gen::free_thunk(old_thunk);
                     }
                 }
 
@@ -5012,12 +5022,16 @@ namespace cloakwork {
 
         template<uint32_t ModuleHash, uint32_t FuncHash>
         CW_FORCEINLINE void* getCachedImport() {
-            static void* cached = nullptr;
-            if (!cached) {
+            static CW_ATOMIC(uintptr_t) cached{0};
+            uintptr_t val = cached.load(CW_MO_ACQUIRE);
+            if (!val) {
                 void* mod = getModuleBase(ModuleHash);
-                if (mod) cached = getProcAddress(mod, FuncHash);
+                if (mod) {
+                    val = reinterpret_cast<uintptr_t>(getProcAddress(mod, FuncHash));
+                    if (val) cached.store(val, CW_MO_RELEASE);
+                }
             }
-            return cached;
+            return reinterpret_cast<void*>(val);
         }
     }
 
@@ -5104,11 +5118,13 @@ namespace cloakwork {
 
         template<uint32_t FuncHash>
         CW_FORCEINLINE uint32_t getCachedSyscallNumber() {
-            static uint32_t cached = SYSCALL_ERROR;
-            if (cached == SYSCALL_ERROR) {
-                cached = getSyscallNumber(FuncHash);
+            static CW_ATOMIC(uint32_t) cached{SYSCALL_ERROR};
+            uint32_t val = cached.load(CW_MO_ACQUIRE);
+            if (val == SYSCALL_ERROR) {
+                val = getSyscallNumber(FuncHash);
+                if (val != SYSCALL_ERROR) cached.store(val, CW_MO_RELEASE);
             }
-            return cached;
+            return val;
         }
 
 #if defined(_WIN64) && !CW_KERNEL_MODE
@@ -5148,9 +5164,13 @@ namespace cloakwork {
         }
 
         CW_FORCEINLINE void* getCachedSyscallGadget() {
-            static void* gadget = nullptr;
-            if (!gadget) gadget = findSyscallGadget();
-            return gadget;
+            static CW_ATOMIC(uintptr_t) gadget{0};
+            uintptr_t val = gadget.load(CW_MO_ACQUIRE);
+            if (!val) {
+                val = reinterpret_cast<uintptr_t>(findSyscallGadget());
+                if (val) gadget.store(val, CW_MO_RELEASE);
+            }
+            return reinterpret_cast<void*>(val);
         }
 
         // indirect syscall invocation via intrinsics
