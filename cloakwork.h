@@ -1679,10 +1679,10 @@ namespace cloakwork {
                             detail::get_proc_by_hash(ntdll, CW_HASH("NtQuerySystemInformation")));
 
                     if (NtQuerySystemInformation) {
-                        ULONG kernel_debug = 0;
+                        struct { BOOLEAN KernelDebuggerEnabled; BOOLEAN KernelDebuggerNotPresent; } kdi = {};
                         // SystemKernelDebuggerInformation = 0x23
-                        NTSTATUS status = NtQuerySystemInformation(0x23, &kernel_debug, sizeof(kernel_debug), nullptr);
-                        if (status == 0 && kernel_debug != 0) return true;
+                        NTSTATUS status = NtQuerySystemInformation(0x23, &kdi, sizeof(kdi), nullptr);
+                        if (status == 0 && kdi.KernelDebuggerEnabled && !kdi.KernelDebuggerNotPresent) return true;
                     }
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER) {
