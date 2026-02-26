@@ -75,38 +75,38 @@ int main() {
     std::cout << CW_STR("[3] Anti-Debug Protection Demo") << std::endl;
     std::cout << CW_STR("   checking for debuggers and analysis tools...") << std::endl;
 
-    // individual checks for demonstration (non-crashing)
+    // use namespace functions for granular checks
     bool any_detected = false;
 
-    if (CW_IS_DEBUGGED()) {
+    if (cloakwork::anti_debug::is_debugger_present()) {
         std::cout << CW_STR("   WARNING: basic debugger detected!") << std::endl;
         any_detected = true;
     } else {
         std::cout << CW_STR("   basic debugger check: clean") << std::endl;
     }
 
-    if (CW_HAS_HWBP()) {
+    if (cloakwork::anti_debug::has_hardware_breakpoints()) {
         std::cout << CW_STR("   WARNING: hardware breakpoints detected!") << std::endl;
         any_detected = true;
     } else {
         std::cout << CW_STR("   hardware breakpoint check: clean") << std::endl;
     }
 
-    if (CW_DETECT_HIDING()) {
+    if (cloakwork::anti_debug::advanced::detect_hiding_tools()) {
         std::cout << CW_STR("   WARNING: anti-anti-debug tools detected!") << std::endl;
         any_detected = true;
     } else {
         std::cout << CW_STR("   hiding tools check: clean") << std::endl;
     }
 
-    if (CW_DETECT_PARENT()) {
+    if (cloakwork::anti_debug::advanced::suspicious_parent_process()) {
         std::cout << CW_STR("   WARNING: suspicious parent process!") << std::endl;
         any_detected = true;
     } else {
         std::cout << CW_STR("   parent process check: clean") << std::endl;
     }
 
-    // note: comprehensive check would crash if debugger detected (commented out for demo)
+    // note: CW_ANTI_DEBUG() would crash if debugger detected (commented out for demo)
     // CW_ANTI_DEBUG();
 
     if (any_detected) {
@@ -245,147 +245,15 @@ int main() {
     std::cout << CW_STR("   (wraps function call in switch-based state machine)") << std::endl;
 
     std::cout << std::endl;
-
     // ==================================================================
-    // 8b. CFG FLATTENING (block-level state machine)
+    // 8b. CFG PROTECTION (CW_PROTECT)
     // ==================================================================
-    std::cout << CW_STR("[8b] CFG Flattening Demo (block-level)") << std::endl;
-    std::cout << CW_STR("   transforming structured code into encrypted state machine...") << std::endl;
+    std::cout << CW_STR("[8b] CFG Protection Demo (CW_PROTECT)") << std::endl;
+    std::cout << CW_STR("   wrapping code in encrypted state machine dispatchers...") << std::endl;
 
-    // demo 1: simple conditional flattened into state machine
-    // original: if (input > 20) result = input * 3; else result = input + 100;
     int cfg_input = 15;
-    int cfg_result1 = CW_FLAT_FUNC(int)
-        CW_FLAT_VARS(
-            int temp = 0;
-        )
-        CW_FLAT_ENTRY(0)
-    CW_FLAT_BEGIN
-        CW_FLAT_BLOCK(0)
-            temp = cfg_input;
-            CW_FLAT_IF(temp > 20, 1, 2)
 
-        CW_FLAT_BLOCK(1)
-            temp = temp * 3;
-            CW_FLAT_GOTO(3)
-
-        CW_FLAT_BLOCK(2)
-            temp = temp + 100;
-            CW_FLAT_GOTO_OBF(3)
-
-        CW_FLAT_BLOCK(3)
-            CW_FLAT_RETURN(temp)
-    CW_FLAT_END;
-
-    std::cout << CW_STR("   conditional: if(15 > 20) 15*3 else 15+100 = ") << cfg_result1
-              << CW_STR(" (expected: 115)") << std::endl;
-
-    // demo 2: loop flattened into state machine
-    // original: while (x > 0) { acc += x; x -= 3; } return acc;
-    int cfg_result2 = CW_FLAT_FUNC(int)
-        CW_FLAT_VARS(
-            int x = 0;
-            int acc = 0;
-        )
-        CW_FLAT_ENTRY(10)
-    CW_FLAT_BEGIN
-        CW_FLAT_BLOCK(10)
-            x = cfg_input * 2;
-            acc = 0;
-            CW_FLAT_GOTO(11)
-
-        CW_FLAT_BLOCK(11)
-            CW_FLAT_IF_OBF(x > 0, 12, 13)
-
-        CW_FLAT_BLOCK(12)
-            acc += x;
-            x -= 3;
-            CW_FLAT_GOTO(11)
-
-        CW_FLAT_BLOCK(13)
-            CW_FLAT_RETURN(acc)
-    CW_FLAT_END;
-
-    std::cout << CW_STR("   loop: sum(30,27,24,...,3) = ") << cfg_result2
-              << CW_STR(" (expected: 165)") << std::endl;
-
-    // demo 3: nested branches with multi-way dispatch
-    int cfg_result3 = CW_FLAT_FUNC(int)
-        CW_FLAT_VARS(
-            int val = 0;
-            int mode = 0;
-        )
-        CW_FLAT_ENTRY(0)
-    CW_FLAT_BEGIN
-        CW_FLAT_BLOCK(0)
-            mode = cfg_input % 3;
-            val = cfg_input;
-            CW_FLAT_SWITCH3(mode, 0,1, 1,2, 2,3, 4)
-
-        CW_FLAT_BLOCK(1)
-            val = val * 10;
-            CW_FLAT_GOTO(5)
-
-        CW_FLAT_BLOCK(2)
-            val = val + 1000;
-            CW_FLAT_GOTO(5)
-
-        CW_FLAT_BLOCK(3)
-            val = val - 5;
-            CW_FLAT_GOTO(5)
-
-        CW_FLAT_BLOCK(4)
-            val = -1;
-            CW_FLAT_GOTO(5)
-
-        CW_FLAT_BLOCK(5)
-            CW_FLAT_RETURN(val)
-    CW_FLAT_END;
-
-    // 15 % 3 == 0, so mode 0 -> block 1: 15 * 10 = 150
-    std::cout << CW_STR("   switch: mode=15%3=0 -> 15*10 = ") << cfg_result3
-              << CW_STR(" (expected: 150)") << std::endl;
-
-    // demo 4: void flattened function
-    int side_effect = 0;
-    CW_FLAT_VOID
-        CW_FLAT_VARS(
-            int counter = 0;
-        )
-        CW_FLAT_ENTRY(0)
-    CW_FLAT_BEGIN
-        CW_FLAT_BLOCK(0)
-            counter = 5;
-            CW_FLAT_GOTO(1)
-
-        CW_FLAT_BLOCK(1)
-            CW_FLAT_IF(counter > 0, 2, 3)
-
-        CW_FLAT_BLOCK(2)
-            side_effect += counter;
-            counter--;
-            CW_FLAT_GOTO(1)
-
-        CW_FLAT_BLOCK(3)
-            CW_FLAT_EXIT()
-    CW_FLAT_VOID_END;
-
-    // 5+4+3+2+1 = 15
-    std::cout << CW_STR("   void: sum(5..1) side_effect = ") << side_effect
-              << CW_STR(" (expected: 15)") << std::endl;
-
-    std::cout << CW_STR("   (IDA sees: encrypted state dispatcher + 6 dead blocks + opaque predicates)") << std::endl;
-    std::cout << CW_STR("   (state values derived from compile-time keyed hash, unique per build)") << std::endl;
-
-    std::cout << std::endl;
-
-    // ==================================================================
-    // 8c. SIMPLIFIED CFG PROTECTION (CW_PROTECT)
-    // ==================================================================
-    std::cout << CW_STR("[8c] Simplified CFG Protection Demo (CW_PROTECT)") << std::endl;
-    std::cout << CW_STR("   same computations as 8b, but with one-line macros...") << std::endl;
-
-    // same conditional as demo 1 above - compare the code volume
+    // conditional protected by encrypted state machine
     int prot_result1 = CW_PROTECT(int, {
         if (cfg_input > 20) return cfg_input * 3;
         return cfg_input + 100;
@@ -393,7 +261,7 @@ int main() {
     std::cout << CW_STR("   conditional: if(15>20) 15*3 else 15+100 = ") << prot_result1
               << CW_STR(" (expected: 115)") << std::endl;
 
-    // same loop as demo 2
+    // loop protected by encrypted state machine
     int prot_result2 = CW_PROTECT(int, {
         int x = cfg_input * 2;
         int acc = 0;
@@ -415,7 +283,7 @@ int main() {
     std::cout << CW_STR("   void: sum(5..1) side_effect = ") << prot_side
               << CW_STR(" (expected: 15)") << std::endl;
 
-    std::cout << CW_STR("   (same state machine output as CW_FLAT_*, zero manual decomposition)") << std::endl;
+    std::cout << CW_STR("   (encrypted state machine output, zero manual decomposition)") << std::endl;
 
     std::cout << std::endl;
 
@@ -460,8 +328,8 @@ int main() {
     int secret_key = secret_key_obf.get();
 
     CW_IF(secret_key != 0) {
-        // note: CW_CHECK_ANALYSIS() would crash if debugger detected (commented for demo)
-        // CW_CHECK_ANALYSIS();
+        // note: CW_ANTI_DEBUG() would crash if debugger detected (commented for demo)
+        // CW_ANTI_DEBUG();
 
         // transform the key using obfuscated operations
         auto xor_part = CW_INT(secret_key ^ 0xDEAD);
@@ -469,7 +337,7 @@ int main() {
         int transformed_key = xor_part.get() + add_part.get();
 
         std::cout << "    " << CW_STR_LAYERED("protected computation result: ") << transformed_key << std::endl;
-        std::cout << "    " << CW_STR_LAYERED("(CW_CHECK_ANALYSIS would protect this in production)") << std::endl;
+        std::cout << "    " << CW_STR_LAYERED("(CW_ANTI_DEBUG would protect this in production)") << std::endl;
     } CW_ELSE {
         std::cout << "    " << CW_STR("unexpected code path") << std::endl;
     }
@@ -482,27 +350,27 @@ int main() {
     std::cout << CW_STR("[12] Advanced Anti-Debug Techniques") << std::endl;
     std::cout << CW_STR("    running comprehensive analysis detection...") << std::endl;
 
-    // check for advanced debugging techniques
-    if (CW_DETECT_KERNEL_DBG()) {
+    // use namespace functions for granular checks
+    if (cloakwork::anti_debug::advanced::kernel_debugger_present()) {
         std::cout << CW_STR("    ALERT: kernel debugger detected!") << std::endl;
     } else {
         std::cout << CW_STR("    kernel debugger: not detected") << std::endl;
     }
 
-    // timing check can have false positives, so it's disabled in comprehensive_check
-    if (CW_TIMING_CHECK()) {
+    // timing check can have false positives
+    if (cloakwork::anti_debug::advanced::advanced_timing_check()) {
         std::cout << CW_STR("    INFO: timing discrepancy detected (may be false positive)") << std::endl;
     } else {
         std::cout << CW_STR("    timing analysis: clean") << std::endl;
     }
 
-    if (CW_DETECT_DBG_ARTIFACTS()) {
+    if (cloakwork::anti_debug::advanced::detect_debugger_artifacts()) {
         std::cout << CW_STR("    INFO: debugger artifacts found in registry") << std::endl;
     } else {
         std::cout << CW_STR("    registry artifacts: clean") << std::endl;
     }
 
-    // show comprehensive check result without crashing
+    // comprehensive check via macro
     if (CW_CHECK_DEBUG()) {
         std::cout << CW_STR("    COMPREHENSIVE: debugger detected (CW_ANTI_DEBUG would crash)") << std::endl;
     } else {
@@ -585,25 +453,26 @@ int main() {
     std::cout << CW_STR("[17] Anti-VM/Sandbox Detection Demo") << std::endl;
     std::cout << CW_STR("   running VM/sandbox detection checks...") << std::endl;
 
-    if (CW_DETECT_HYPERVISOR()) {
+    // use namespace functions for granular checks
+    if (cloakwork::anti_debug::anti_vm::is_hypervisor_present()) {
         std::cout << CW_STR("   INFO: hypervisor detected") << std::endl;
     } else {
         std::cout << CW_STR("   hypervisor check: clean") << std::endl;
     }
 
-    if (CW_DETECT_VM_VENDOR()) {
+    if (cloakwork::anti_debug::anti_vm::detect_vm_vendor()) {
         std::cout << CW_STR("   INFO: VM vendor signature detected") << std::endl;
     } else {
         std::cout << CW_STR("   VM vendor check: clean") << std::endl;
     }
 
-    if (CW_DETECT_LOW_RESOURCES()) {
+    if (cloakwork::anti_debug::anti_vm::detect_low_resources()) {
         std::cout << CW_STR("   INFO: low resources detected (possible sandbox)") << std::endl;
     } else {
         std::cout << CW_STR("   resource check: clean") << std::endl;
     }
 
-    if (CW_DETECT_SANDBOX_DLLS()) {
+    if (cloakwork::anti_debug::anti_vm::detect_sandbox_dlls()) {
         std::cout << CW_STR("   INFO: sandbox DLLs detected") << std::endl;
     } else {
         std::cout << CW_STR("   sandbox DLL check: clean") << std::endl;
@@ -728,13 +597,13 @@ int main() {
     std::cout << std::endl;
 
     // ==================================================================
-    // 25. ENHANCED ANTI-DEBUG (NtQueryInformationProcess)
+    // 25. ENHANCED ANTI-DEBUG (namespace functions)
     // ==================================================================
     std::cout << CW_STR("[25] Enhanced Anti-Debug Demo") << std::endl;
 
     // debug port check via NtQueryInformationProcess
-    bool debug_port = CW_CHECK_DEBUG_PORT();
-    std::cout << CW_STR("   CW_CHECK_DEBUG_PORT(): ") << (debug_port ? CW_STR("DEBUGGER DETECTED") : "clean") << std::endl;
+    bool debug_port = cloakwork::anti_debug::enhanced::check_debug_port();
+    std::cout << CW_STR("   debug port check: ") << (debug_port ? CW_STR("DEBUGGER DETECTED") : "clean") << std::endl;
     std::cout << CW_STR("   (queries ProcessDebugPort + ProcessDebugObjectHandle via NtQueryInformationProcess)") << std::endl;
 
     // hide thread from debugger - available but not called to keep demo debuggable
@@ -773,7 +642,7 @@ int main() {
     std::cout << "    - " << CW_STR("obfuscated comparison operators") << std::endl;
     std::cout << "    - " << CW_STR("encrypted compile-time constants") << std::endl;
     std::cout << "    - " << CW_STR("control flow obfuscation and flattening") << std::endl;
-    std::cout << "    - " << CW_STR("CFG flattening (block-level encrypted state machine)") << std::endl;
+    std::cout << "    - " << CW_STR("CFG protection (encrypted state machine via CW_PROTECT)") << std::endl;
     std::cout << "    - " << CW_STR("junk code insertion") << std::endl;
     std::cout << "    - " << CW_STR("function pointer encryption") << std::endl;
     std::cout << "    - " << CW_STR("metamorphic function implementations") << std::endl;
