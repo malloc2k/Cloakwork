@@ -1555,39 +1555,23 @@ namespace cloakwork {
                         detail::get_proc_by_hash(user32, CW_HASH("EnumWindows")));
                     auto pGetClassNameA = reinterpret_cast<int(WINAPI*)(HWND, LPSTR, int)>(
                         detail::get_proc_by_hash(user32, CW_HASH("GetClassNameA")));
-                    auto pGetWindowTextA = reinterpret_cast<int(WINAPI*)(HWND, LPSTR, int)>(
-                        detail::get_proc_by_hash(user32, CW_HASH("GetWindowTextA")));
-
-                    if (pEnumWindows && pGetClassNameA && pGetWindowTextA) {
+                    if (pEnumWindows && pGetClassNameA) {
                         constexpr uint32_t dbg_class_hashes[] = {
                             CW_HASH("OLLYDBG"),
                             CW_HASH("WinDbgFrameClass"),
                             CW_HASH("ID"),
                             CW_HASH("ObsidianGUI"),
                         };
-                        constexpr uint32_t dbg_title_hashes[] = {
-                            CW_HASH("x64dbg"),
-                            CW_HASH("x32dbg"),
-                            CW_HASH("x86dbg"),
-                            CW_HASH("x96dbg"),
-                            CW_HASH("Zeta Debugger"),
-                            CW_HASH("Rock Debugger"),
-                        };
-
                         struct enum_ctx {
                             bool found;
                             const uint32_t* class_hashes;
                             size_t class_count;
-                            const uint32_t* title_hashes;
-                            size_t title_count;
                             decltype(pGetClassNameA) getClassName;
-                            decltype(pGetWindowTextA) getWindowText;
                         };
 
                         enum_ctx ctx = {
                             false, dbg_class_hashes, sizeof(dbg_class_hashes)/sizeof(uint32_t),
-                            dbg_title_hashes, sizeof(dbg_title_hashes)/sizeof(uint32_t),
-                            pGetClassNameA, pGetWindowTextA
+                            pGetClassNameA
                         };
 
                         pEnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
@@ -1597,11 +1581,6 @@ namespace cloakwork {
                                 uint32_t h = hash::fnv1a_runtime(buf);
                                 for (size_t i = 0; i < c->class_count; ++i)
                                     if (h == c->class_hashes[i]) { c->found = true; return FALSE; }
-                            }
-                            if (c->getWindowText(hwnd, buf, sizeof(buf)) > 0) {
-                                uint32_t h = hash::fnv1a_runtime(buf);
-                                for (size_t i = 0; i < c->title_count; ++i)
-                                    if (h == c->title_hashes[i]) { c->found = true; return FALSE; }
                             }
                             return TRUE;
                         }, reinterpret_cast<LPARAM>(&ctx));
