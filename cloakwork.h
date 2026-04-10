@@ -162,10 +162,6 @@ Refer to the README.md for usage.
     #error "CW_ENABLE_ANTI_DEBUG requires CW_ENABLE_COMPILE_TIME_RANDOM to be enabled"
 #endif
 
-#if CW_ENABLE_ANTI_DEBUG && !CW_ENABLE_STRING_ENCRYPTION
-    #error "CW_ENABLE_ANTI_DEBUG requires CW_ENABLE_STRING_ENCRYPTION to be enabled"
-#endif
-
 #if CW_KERNEL_MODE
     #ifndef _NTDDK_
         #error "In kernel mode, include <ntddk.h> before cloakwork.h"
@@ -987,8 +983,9 @@ namespace cloakwork {
             return seed;
         }
 
-        constexpr uint32_t compile_seed_impl(uint32_t counter) {
+        constexpr uint32_t compile_seed_impl(uint32_t line, uint32_t counter) {
             uint32_t seed = 0xDEADBEEF;
+            seed ^= line * 0x01000193;
             seed ^= counter * 0x811c9dc5;
             seed *= 0x1664525;
             seed += 0x1013904223;
@@ -1019,7 +1016,11 @@ namespace cloakwork {
     // callsites when Edit-and-Continue debug rewriting materializes __LINE__ as a
     // non-constant symbol. Materialize the entropy directly to keep the result
     // constexpr while preserving per-expansion variation through __COUNTER__.
+#if CW_KERNEL_MODE
+    #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__LINE__, __COUNTER__))
+#else
     #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__COUNTER__))
+#endif
     #define CW_RANDOM_CT() (CW_COMPILE_SEED())
     #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
 
