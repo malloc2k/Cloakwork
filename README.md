@@ -83,6 +83,10 @@ Define feature macros **before** including the header. All features are enabled 
 | `CW_ENABLE_INTEGRITY_CHECKS` | Code integrity verification | `1` |
 | `CW_ANTI_DEBUG_RESPONSE` | Debugger response: 0=ignore, 1=crash, 2=fake data | `1` |
 
+If you disable `CW_ENABLE_ALL` and selectively re-enable features, note that
+`CW_ENABLE_ANTI_DEBUG` depends on both `CW_ENABLE_COMPILE_TIME_RANDOM` and
+`CW_ENABLE_STRING_ENCRYPTION`. Cloakwork now emits a compile-time error when
+that dependency contract is violated.
 
 ---
 
