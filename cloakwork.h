@@ -158,6 +158,10 @@ Refer to the README.md for usage.
     #error "CW_ENABLE_CONTROL_FLOW requires CW_ENABLE_COMPILE_TIME_RANDOM to be enabled"
 #endif
 
+#if CW_ENABLE_ANTI_DEBUG && !CW_ENABLE_COMPILE_TIME_RANDOM
+    #error "CW_ENABLE_ANTI_DEBUG requires CW_ENABLE_COMPILE_TIME_RANDOM to be enabled"
+#endif
+
 #if CW_KERNEL_MODE
     #ifndef _NTDDK_
         #error "In kernel mode, include <ntddk.h> before cloakwork.h"
@@ -970,53 +974,55 @@ namespace cloakwork {
 
 #if CW_KERNEL_MODE
         // consteval with __TIME__/__DATE__ doesn't work properly in WDK
+        constexpr uint32_t mix_compile_seed(uint32_t seed) {
+            seed ^= seed >> 16;
+            seed *= 0x7feb352dU;
+            seed ^= seed >> 15;
+            seed *= 0x846ca68bU;
+            seed ^= seed >> 16;
+            return seed;
+        }
+
         constexpr uint32_t compile_seed_impl(uint32_t line, uint32_t counter) {
             uint32_t seed = 0xDEADBEEF;
             seed ^= line * 0x01000193;
             seed ^= counter * 0x811c9dc5;
             seed *= 0x1664525;
             seed += 0x1013904223;
+            return mix_compile_seed(seed);
+        }
+#else
+        consteval uint32_t mix_compile_seed(uint32_t seed) {
+            seed ^= seed >> 16;
+            seed *= 0x7feb352dU;
+            seed ^= seed >> 15;
+            seed *= 0x846ca68bU;
+            seed ^= seed >> 16;
             return seed;
         }
 
-        #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__LINE__, __COUNTER__))
-
-        template<uint32_t Seed>
-        struct random_generator {
-            static constexpr uint32_t value() {
-                return (Seed * 1664525u + 1013904223u);
-            }
-            static constexpr uint32_t next() {
-                return random_generator<value()>::value();
-            }
-        };
-    }
-
-    #define CW_RANDOM_CT() (cloakwork::detail::random_generator<CW_COMPILE_SEED()>::value())
-    #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
-
-#else
-        constexpr uint32_t compile_seed() {
+        consteval uint32_t compile_seed_impl(uint32_t counter) {
             constexpr uint32_t time_hash = fnv1a_hash(__TIME__);
             constexpr uint32_t date_hash = fnv1a_hash(__DATE__);
             constexpr uint32_t file_hash = fnv1a_hash(__FILE__);
-            return time_hash ^ (date_hash << 1) ^ (file_hash >> 1) ^ __LINE__;
+            uint32_t seed = time_hash ^ (date_hash << 1) ^ (file_hash >> 1);
+            seed ^= counter * 0x9E3779B9u;
+            return mix_compile_seed(seed);
         }
-
-        template<uint32_t Seed>
-        struct random_generator {
-            static constexpr uint32_t value() {
-                return (Seed * 1664525u + 1013904223u) ^ __COUNTER__;
-            }
-            static constexpr uint32_t next() {
-                return random_generator<value()>::value();
-            }
-        };
+#endif
     }
 
-    #define CW_RANDOM_CT() (cloakwork::detail::random_generator<cloakwork::detail::compile_seed() ^ __COUNTER__>::value())
-    #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
+    // MSVC 19.50 rejects the original random_generator<...> path in anti-debug
+    // callsites when Edit-and-Continue debug rewriting materializes __LINE__ as a
+    // non-constant symbol. Materialize the entropy directly to keep the result
+    // constexpr while preserving per-expansion variation through __COUNTER__.
+#if CW_KERNEL_MODE
+    #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__LINE__, __COUNTER__))
+#else
+    #define CW_COMPILE_SEED() (cloakwork::detail::compile_seed_impl(__COUNTER__))
 #endif
+    #define CW_RANDOM_CT() (CW_COMPILE_SEED())
+    #define CW_RAND_CT(min, max) ((min) + (CW_RANDOM_CT() % ((max) - (min) + 1)))
 
     #define CW_RANDOM_RT() (cloakwork::detail::runtime_entropy())
     #define CW_RAND_RT(min, max) ((min) + (CW_RANDOM_RT() % ((max) - (min) + 1)))
@@ -1213,7 +1219,7 @@ namespace cloakwork {
 
     #define CW_ADSTR(name, str) \
         static constexpr cloakwork::internal_cipher::encrypted_buf< \
-            __LINE__ * 0x45D9F3Bu + static_cast<uint32_t>(sizeof(str)) * 0x9E3779B9u, sizeof(str)> \
+            (CW_HASH(str) ^ CW_COMPILE_SEED()), sizeof(str)> \
             _cw_adenc_##name(str); \
         char name[sizeof(str)]; \
         cloakwork::internal_cipher::decrypt_to_stack(_cw_adenc_##name, name)
